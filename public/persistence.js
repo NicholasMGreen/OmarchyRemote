@@ -16,7 +16,10 @@
     'omarchy-layout-phone',
     'omarchy-layout-desk',
     'omarchy-focus-follows-pointer',
+    'omarchy-text-scale',
   ];
+  // The text-scale engine lives in public/text-scale.js; this module keeps the
+  // backup key and the Settings UI.
   const snapshot = () =>
     Object.fromEntries(keys.map(k => [k, storage.get(k)]).filter(([, v]) => v !== null));
   const initial = snapshot();
@@ -409,6 +412,17 @@
     focusInput.onchange = () =>
       storage.set('omarchy-focus-follows-pointer', String(focusInput.checked));
     focusRow.append(focusInput, node('span', '', 'Focus follows pointer'));
+    const sizeRow = node('label', 'device-focus-option');
+    const sizeInput = node('select');
+    sizeInput.setAttribute('aria-label', 'Text size');
+    for (const value of window.HyprlandTextScale?.SCALES || ['100']) {
+      const option = node('option', '', value === '100' ? 'Default (100%)' : value + '%');
+      option.value = value;
+      sizeInput.append(option);
+    }
+    sizeInput.value = window.HyprlandTextScale?.current() || '100';
+    sizeInput.onchange = () => window.HyprlandTextScale?.set(sizeInput.value);
+    sizeRow.append(node('span', '', 'Text size'), sizeInput);
     const layoutRow = node('label', 'device-focus-option');
     const layoutInput = node('select');
     layoutInput.setAttribute('aria-label', 'Window layout');
@@ -439,6 +453,12 @@
         'p',
         'theme-note',
         'Mouse or trackpad movement focuses the window underneath in desk mode. Saved for this device.'
+      ),
+      sizeRow,
+      node(
+        'p',
+        'theme-note',
+        'Shrinks or grows text between 70% and 125%, including Terminal and host apps. Windows keep their layout. Saved for this device.'
       ),
       problem,
       actions,

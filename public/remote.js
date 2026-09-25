@@ -34,10 +34,13 @@
     new WebSocket(
       `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/${path}`
     );
+  // Terminal and the host TUI apps follow the device Text size setting.
+  const terminalFontSize = () =>
+    (window.HyprlandDesk?.isDesk() ? 13 : 12) * (window.HyprlandTextScale?.factor() ?? 1);
   function terminal(host, readonly = false) {
     const t = new Terminal({
       fontFamily: '"JetBrains Mono", monospace',
-      fontSize: window.HyprlandDesk?.isDesk() ? 13 : 12,
+      fontSize: terminalFontSize(),
       lineHeight: 1.15,
       theme: window.HyprlandThemes?.terminalTheme() || theme,
       scrollback: 3000,
@@ -332,6 +335,11 @@
       });
       this.fit = new FitAddon.FitAddon();
       this.term.loadAddon(this.fit);
+      this.onTextScale = () => {
+        if (this.app === 'terminal') this.term.options.fontSize = terminalFontSize();
+        this.resize();
+      };
+      window.addEventListener('hyprland-text-scale', this.onTextScale);
       // The host answers DSR, including before a client attaches.
       this.term.parser.registerCsiHandler(
         { final: 'n' },
@@ -355,11 +363,14 @@
       try {
         if (this.app !== 'terminal') {
           const minCols = HOST_TUIS[this.app].cols;
-          const font = this.tuiFit
-            ? Math.min(12, (this.host.clientWidth - 4) / (minCols * 0.60375))
-            : 12;
-          this.term.options.fontSize = font;
-          this.host.style.setProperty('--host-tui-font', font + 'px');
+          const fitted = (this.host.clientWidth - 4) / (minCols * 0.60375);
+          // Fit width owns its size so every column stays visible; the Larger toggle
+          // follows the Text size setting.
+          const scaled = this.tuiFit
+            ? Math.min(12, fitted)
+            : 12 * (window.HyprlandTextScale?.factor() ?? 1);
+          this.term.options.fontSize = scaled;
+          this.host.style.setProperty('--host-tui-font', scaled + 'px');
           const d = this.fit.proposeDimensions();
           if (d) this.term.resize(Math.max(minCols, d.cols), Math.max(24, d.rows));
         } else this.fit.fit();
@@ -490,6 +501,7 @@
     }
     dispose() {
       this.disposed = true;
+      window.removeEventListener('hyprland-text-scale', this.onTextScale);
       clearTimeout(this.retry);
       this.ws?.close();
       this.resizeObserver.disconnect();
@@ -830,6 +842,11 @@
         () => this.flushRead()
       );
       this.applyFit();
+      this.onTextScale = () => {
+        this.term.options.fontSize = terminalFontSize();
+        if (this.lastRead) this.renderOutput(this.lastRead, true);
+      };
+      window.addEventListener('hyprland-text-scale', this.onTextScale);
       this.term.onScroll(() => {
         if (!this.rendering) this.trackScroll();
       });
@@ -1355,6 +1372,7 @@
     }
     dispose() {
       this.disposed = true;
+      window.removeEventListener('hyprland-text-scale', this.onTextScale);
       this.folderPicker?.dispose();
       this.uploadAbort.abort();
       clearTimeout(this.retry);
