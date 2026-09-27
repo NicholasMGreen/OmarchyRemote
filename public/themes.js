@@ -257,6 +257,7 @@
     host.append(head, themes.panel, picker.panel);
     window.HyprlandPreferences?.settings(host);
     window.HyprlandSolo?.settings(host);
+    window.HyprlandDictation?.settings(host);
     drawBackgrounds();
     // Let native scrolling own this surface without triggering workspace swipes.
     for (const type of ['pointerdown', 'touchstart', 'touchmove', 'touchend'])

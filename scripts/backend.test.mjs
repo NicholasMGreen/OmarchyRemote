@@ -599,3 +599,17 @@ test('Files Trash is recoverable and contains the selected fixture bytes', async
     await rm(folder, { recursive: true, force: true });
   }
 });
+
+test('dictation advertises its provider and refuses non-audio uploads', async () => {
+  const provider = await api('dictation');
+  assert.equal(typeof provider.available, 'boolean');
+  assert.equal(typeof provider.provider, 'string');
+  assert.equal(provider.max_seconds, 120);
+  const response = await fetch(base + '/api/dictation', {
+    method: 'POST',
+    headers: { 'X-Hyprland-Client': '1', 'Content-Type': 'application/octet-stream' },
+    body: 'not an audio recording',
+  });
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /recording format/);
+});

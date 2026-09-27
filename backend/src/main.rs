@@ -2,6 +2,7 @@ mod ansi;
 mod apps;
 mod browser;
 mod codexbar;
+mod dictation;
 mod files;
 mod files_ops;
 mod herdr;
@@ -517,6 +518,12 @@ async fn main() -> anyhow::Result<()> {
     };
     let router = Router::new()
         .route("/api/capabilities", get(capabilities))
+        .route(
+            "/api/dictation",
+            get(dictation::status)
+                .post(dictation::transcribe)
+                .layer(DefaultBodyLimit::max(dictation::MAX_BYTES)),
+        )
         .route("/api/state", get(preferences::snapshot))
         .route("/api/state/webapps", post(preferences::change))
         .route("/api/state/devices", get(preferences::devices))

@@ -43,6 +43,8 @@ On an iPad, Omarchy Remote uses the desk layout: tiled windows, workspaces and h
 | `docs/`                        | [Feature reference](docs/features.md).                                                                                                                                                                          |
 | `tests/`, `scripts/*.test.mjs` | Playwright and Node tests.                                                                                                                                                                                      |
 
+Herdr supports host-transcribed dictation with a microphone button or **⌘⌃X**. It defaults to Voxtype; host administrators can configure another transcription command. See [dictation setup](docs/dictation.md).
+
 Herdr’s folder button opens Files directly in the current pane’s directory, for browsing and previewing files mentioned by an agent.
 
 ## Requirements

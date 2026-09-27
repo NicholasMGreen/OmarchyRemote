@@ -294,6 +294,18 @@
       } else this.key('⏎', {});
       this.focus();
     }
+    // Apply to the original thread, preserving edits made while transcription was running.
+    insertDictation(id, transcript) {
+      this.saveDraft();
+      const before = id === this.id ? this.draft : this.loadDraft(id);
+      const text = before + (before && !/\s$/.test(before) ? ' ' : '') + transcript;
+      if (id === this.id) {
+        this.message = true;
+        this.draft = text;
+        this.configure();
+      }
+      this.storeDraft(id, text);
+    }
     // Append an upload reference to a pane's draft: `Image:` for pictures, `File:` otherwise.
     attachFile(id, path, kind = 'file') {
       this.saveDraft();

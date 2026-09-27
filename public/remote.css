@@ -801,3 +801,18 @@
 .herdr-composer .native-dismiss {
   border-radius: 10px;
 }
+
+.dictation-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 4px 0;
+}
+.dictation-notice[hidden] {
+  display: none;
+}
+.dictation-button[aria-pressed='true'] {
+  color: var(--theme-red);
+  border-color: currentColor;
+}

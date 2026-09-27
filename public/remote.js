@@ -918,6 +918,8 @@
         { dismissOnSend: true, compactControls: true, draftStore: 'omarchy-herdr-drafts-v1' }
       );
       this.nativeInput.select(this.selected);
+      this.dictation = new HyprlandDictation(this.nativeInput, () => this.selected, inputBar);
+      this.promptRow.append(this.dictation.button);
       this.nativeInput.field.addEventListener('paste', e => {
         const files = [...(e.clipboardData?.items || [])]
           .filter(i => i.kind === 'file')
@@ -934,6 +936,9 @@
       this.resizeObserver.observe(this.output);
       this.splitObserver = new ResizeObserver(() => this.layout(root.clientWidth >= 700));
       this.splitObserver.observe(root);
+    }
+    get actions() {
+      return this.selected ? this.dictation.actions : [];
     }
     // Wide tiles show the whole pane list as a sidebar in place of the list page.
     layout(split) {
@@ -1287,9 +1292,11 @@
       this.promptRow.hidden = composing;
       if (composing) {
         this.nativeInput.row.insertBefore(this.attachButton, this.nativeInput.field);
+        this.nativeInput.row.insertBefore(this.dictation.button, this.nativeInput.field);
         this.nativeInput.header.insertBefore(this.latest, this.nativeInput.hideButton);
       } else {
         this.promptRow.prepend(this.attachButton);
+        this.promptRow.append(this.dictation.button);
         this.outputTools.append(this.latest);
       }
     }
@@ -1503,6 +1510,7 @@
     }
     dispose() {
       this.disposed = true;
+      this.dictation?.dispose();
       this.folderPicker?.dispose();
       this.uploadAbort.abort();
       clearTimeout(this.retry);

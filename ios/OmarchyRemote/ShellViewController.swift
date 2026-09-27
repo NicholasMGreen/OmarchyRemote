@@ -777,7 +777,20 @@ private final class BrowserDeviceBridge: NSObject, WKScriptMessageHandlerWithRep
 }
 
 @MainActor
-final class ShellViewController: UIViewController, WKNavigationDelegate {
+final class ShellViewController: UIViewController, WKNavigationDelegate, WKUIDelegate {
+    func webView(
+        _ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+        initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType,
+        decisionHandler: @escaping (WKPermissionDecision) -> Void
+    ) {
+        guard webView === self.webView, frame.isMainFrame, type == .microphone,
+            ShellSource.trusts(origin)
+        else {
+            decisionHandler(.deny)
+            return
+        }
+        decisionHandler(.prompt)
+    }
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "OmarchyRemote", category: "Shell")
     private let background = UIColor(red: 25 / 255, green: 23 / 255, blue: 36 / 255, alpha: 1)
     private var webView: WKWebView!
@@ -1014,6 +1027,7 @@ final class ShellViewController: UIViewController, WKNavigationDelegate {
         webView = ShellWebView(frame: .zero, configuration: configuration)
         webView.translatesAutoresizingMaskIntoConstraints = false
         webView.navigationDelegate = self
+        webView.uiDelegate = self
         webView.isOpaque = false
         webView.backgroundColor = background
         webView.underPageBackgroundColor = background
