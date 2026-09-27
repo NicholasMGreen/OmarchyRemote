@@ -1347,6 +1347,16 @@
   window.HostFilesApp = FilesApp;
   window.HyprlandApps?.provide('files', {
     multiple: true,
+    // Both a fresh Files window and an existing one start at the requested folder.
+    // Saved path also carries this handoff into a standalone app window.
+    openAt(bridge, path) {
+      try {
+        localStorage.setItem('omarchy-files-path', path);
+      } catch {}
+      store('omarchy-files-mode', 'browse');
+      bridge.app('files')?.browse(path);
+      bridge.logic.openApp('files');
+    },
     create: (root, bridge, spec) =>
       new FilesApp(root, path => bridge.openTerminalAt(path), spec?.key),
   });

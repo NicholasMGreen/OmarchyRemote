@@ -43,6 +43,8 @@ On an iPad, Omarchy Remote uses the desk layout: tiled windows, workspaces and h
 | `docs/`                        | [Feature reference](docs/features.md).                                                                                                                                                                          |
 | `tests/`, `scripts/*.test.mjs` | Playwright and Node tests.                                                                                                                                                                                      |
 
+Herdr’s folder button opens Files directly in the current pane’s directory, for browsing and previewing files mentioned by an agent.
+
 ## Requirements
 
 - An Omarchy (Arch + Hyprland) host, or any Linux host with systemd user services. The shell reads Omarchy theme files if present and falls back to its bundled palettes.

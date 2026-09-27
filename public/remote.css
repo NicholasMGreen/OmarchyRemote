@@ -587,6 +587,7 @@
 .herdr-detail-bar > button {
   flex: none;
 }
+.herdr-browse,
 .herdr-new-tab {
   width: 36px;
   height: 36px;

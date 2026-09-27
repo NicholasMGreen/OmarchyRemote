@@ -198,3 +198,38 @@ for (const viewport of [
     await expect.poll(() => selected.at(-1)).toBe('qa:p2');
   });
 }
+
+for (const width of [402, 1194]) {
+  test(`open the selected pane folder in Files at ${width}px`, async ({ page: p }) => {
+    await p.setViewportSize({ width, height: 874 });
+    await p.route('**/api/**', r => r.abort());
+    await p.route(
+      url => url.pathname === '/api/files',
+      r => r.fulfill({ json: listing(new URL(r.request().url()).searchParams.get('path') || home) })
+    );
+    const snapshot = {
+      workspaces: [{ workspace_id: 'qa', label: 'Project' }],
+      tabs: [{ tab_id: 'qa:t1', label: 'Agent' }],
+      panes: [{ ...pane('qa:p1', 'qa', 'Agent'), cwd: home, foreground_cwd: home + '/project' }],
+    };
+    await p.routeWebSocket('**/api/herdr/ws', ws => {
+      ws.send(JSON.stringify({ type: 'snapshot', snapshot }));
+    });
+    await p.goto('/native/');
+    await p.keyboard.press('Meta+Shift+A');
+    const herdr = p.locator('#remote-herdr-app');
+    await herdr.locator('.herdr-pane').click();
+    const folder = herdr.getByRole('button', { name: 'Open pane folder in Files' });
+    await expect(folder).toBeVisible();
+    await folder.click();
+    const files = p.locator('#remote-files-app');
+    await expect(files.locator('.files-path')).toHaveAttribute('data-path', home + '/project');
+    await files.getByRole('button', { name: 'Home folder', exact: true }).click();
+    await expect(files.locator('.files-path')).toHaveAttribute('data-path', home);
+    // Reusing Files returns to the pane's directory instead of its last visited folder.
+    await p.keyboard.press('Meta+Shift+A');
+    await folder.click();
+    await expect(files.locator('.files-path')).toHaveAttribute('data-path', home + '/project');
+    await expect(p.locator('#remote-files-app')).toHaveCount(1);
+  });
+}

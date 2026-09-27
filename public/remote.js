@@ -842,7 +842,23 @@
       this.newTabButton.classList.add('herdr-new-tab', 'keycap');
       this.newTabButton.setAttribute('aria-label', 'New tab in this workspace');
       this.newTabButton.title = 'New tab in this workspace';
-      this.detailBar.append(this.backButton, this.detailCenter, this.newTabButton, this.filePicker);
+      this.browseButton = button('', () => {
+        const pane = this.snapshot?.panes.find(p => p.pane_id === this.selected);
+        const path = pane?.foreground_cwd || pane?.cwd;
+        if (path) HyprlandApps.get('files')?.provider?.openAt(this.bridge, path);
+      });
+      this.browseButton.classList.add('herdr-browse', 'keycap');
+      this.browseButton.setAttribute('aria-label', 'Open pane folder in Files');
+      this.browseButton.title = 'Open pane folder in Files';
+      this.browseButton.innerHTML =
+        '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1Z"/></svg>';
+      this.detailBar.append(
+        this.backButton,
+        this.detailCenter,
+        this.browseButton,
+        this.newTabButton,
+        this.filePicker
+      );
       this.output = node('div', 'herdr-output');
       this.canvas = node('div', 'herdr-canvas');
       // Fit and ↓ Latest float inside the output panel's bottom-right corner.
@@ -932,6 +948,9 @@
       const detail = !this.detail.hidden;
       this.searchField.hidden = this.list.hidden = detail && !this.split;
       this.placeholder.hidden = detail || !this.split;
+      this.browseButton.hidden = !detail;
+      if (this.split) this.searchField.append(this.browseButton);
+      else this.detailBar.insertBefore(this.browseButton, this.newTabButton);
       // The sidebar already names the pane, so a split tile shows nothing above the output.
       this.detailBar.hidden = this.backButton.hidden = this.split;
       this.paneTabs.hidden = this.split || this.tabsRedundant;
@@ -1109,6 +1128,7 @@
     showDetail(pane) {
       this.detail.hidden = false;
       this.title.textContent = this.paneLabel(pane);
+      this.browseButton.disabled = !(pane.foreground_cwd || pane.cwd);
       const signature = JSON.stringify([
         pane.pane_id,
         pane.agent_status,

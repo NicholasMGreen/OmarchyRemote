@@ -16,6 +16,8 @@ Herdr shows the local running Herdr's workspaces, agents, statuses and panes. Wo
 
 **+** at the right of an open pane's header adds a tab to that pane's Herdr workspace. The same chooser opens in the pane's current folder, so **start here** is one tap, and the new tab's pane opens. On a wide tile, where the pane list is a sidebar and the pane has no header, each workspace's header in the sidebar has the **+** instead.
 
+The folder button opens Files in the selected pane’s current directory (the foreground process directory when available). It reuses the main Files window and clears its previous search or preview. On wide tiles the button sits beside pane search; on smaller tiles it sits in the pane header. Browse or preview files without sending anything to the agent.
+
 Herdr's paperclip opens the phone file picker (photos or any file from Files, such as a ZIP), and the composer accepts pasted files. Files up to 100 MiB each upload through the backend to `~/.local/share/omarchy-remote/uploads/` on the host, keeping a sanitised copy of their name so the agent can tell `report.zip` from a screenshot. Files have private permissions and are retained until removed on the host; they are not web assets. Each attachment appends `Image: /absolute/host/path` for PNG, JPEG, GIF, WebP or HEIC/HEIF content and `File: /absolute/host/path` for anything else to the original pane's draft, even if you switch panes during upload. Review the draft and press Send to submit; uploading never sends terminal input automatically.
 
 ## Output views
