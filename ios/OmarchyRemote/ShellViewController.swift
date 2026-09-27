@@ -1009,6 +1009,7 @@ final class ShellViewController: UIViewController, WKNavigationDelegate, WKUIDel
                 source: """
                     (() => {
                         window.__HYPRLAND_NATIVE_FOCUS__ = true;
+                        window.__OMARCHY_DICTATION_CAPTURE__ = true;
                         const report = () => {
                             const el = document.activeElement;
                             const editing = !!el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName));

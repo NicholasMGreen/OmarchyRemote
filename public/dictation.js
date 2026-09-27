@@ -50,6 +50,13 @@
       const generation = ++this.generation;
       this.paint('starting', 'Opening microphone…');
       try {
+        if (
+          window.__HYPRLAND_NATIVE_FOCUS__ &&
+          window.__OMARCHY_PLATFORM__ !== 'android' &&
+          !window.__OMARCHY_DICTATION_CAPTURE__
+        ) {
+          throw Error('Update the Apple app to build 40 or newer to enable microphone recording.');
+        }
         if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder)
           throw Error('Microphone capture is unavailable. Update the native app or use HTTPS.');
         const response = await fetch('/api/dictation', { headers: { 'X-Hyprland-Client': '1' } });

@@ -47,7 +47,7 @@ models keep it on the host.
 ## Recording and limits
 
 The client requires HTTPS (or localhost), microphone permission and MediaRecorder.
-The iOS/iPadOS app requires build 39 or newer. It requests permission only for the
+The iOS/iPadOS app requires build 40 or newer. It requests permission only for the
 trusted shell's microphone; embedded websites do not inherit that grant. Android
 and desktop wrappers need their own microphone permission support if unavailable.
 
