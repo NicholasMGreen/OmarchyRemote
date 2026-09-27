@@ -56,6 +56,8 @@
     'touchend',
     'touchcancel',
   ];
+  const editable = element =>
+    !!element && (element.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(element.tagName));
   function bufferLines(term) {
     const buffer = term.buffer.active;
     return Array.from({ length: buffer.length }, (_, i) =>
@@ -1505,6 +1507,7 @@
       this.focusRetries = 0;
       this.rememberedFocus = new WeakMap();
       this.rememberFocus = e => {
+        if (editable(e.target)) this.focusReleased = null;
         const root = e.target.closest?.('[data-workspace]');
         if (root) this.rememberedFocus.set(root, e.target);
       };
@@ -1520,13 +1523,27 @@
         document.addEventListener(event, this.reconcileFocus);
       // A press can become a text selection, and focusing the input mid-gesture would clear it.
       this.pressed = false;
+      // iOS spends a long press on ending the input's editing session, not on selecting. Leaving
+      // the input unfocused afterwards lets the next long press select; a tap brings it back.
       this.trackPress = e => {
         if (e.pointerType === 'touch') return;
-        this.pressed = e.touches ? e.touches.length > 0 : e.type === 'pointerdown';
-        if (!this.pressed) this.reconcileFocus();
+        const pressed = e.touches ? e.touches.length > 0 : e.type === 'pointerdown';
+        if (pressed && !this.pressed) this.pressStarted = performance.now();
+        this.pressed = pressed;
+        if (pressed) return;
+        if (performance.now() - this.pressStarted >= 350 && !editable(document.activeElement))
+          this.focusReleased = this.logic.cur();
+        this.reconcileFocus();
       };
       for (const event of PRESS_EVENTS)
         document.addEventListener(event, this.trackPress, { capture: true, passive: true });
+      // Typing after a long press goes to the input again, as a tap would.
+      this.typeToFocus = e => {
+        if (!this.focusReleased || e.metaKey || e.ctrlKey || e.altKey || editable(e.target)) return;
+        this.focusReleased = null;
+        this.syncFocus();
+      };
+      document.addEventListener('keydown', this.typeToFocus, true);
       window.addEventListener('focus', this.reconcileFocus);
       this.foreground = () => {
         this.pressed = false;
@@ -1577,6 +1594,7 @@
       });
     }
     keyboard() {
+      this.focusReleased = null;
       if (!this.logic.state.ov) {
         this.logic.set({ kb: true });
         this.currentInput()?.focus();
@@ -1663,7 +1681,8 @@
         this.cancelNativeFocus();
         return;
       }
-      if (this.pressed) return;
+      if (this.focusReleased !== current) this.focusReleased = null;
+      if (this.pressed || this.focusReleased) return;
       const root = mount(HyprlandApps.get(current)?.mount);
       if (!root) return;
       const selection = window.getSelection();
@@ -1792,6 +1811,7 @@
         document.removeEventListener(event, this.reconcileFocus);
       for (const event of PRESS_EVENTS)
         document.removeEventListener(event, this.trackPress, { capture: true });
+      document.removeEventListener('keydown', this.typeToFocus, true);
       window.removeEventListener('focus', this.reconcileFocus);
       document.removeEventListener('focusin', this.rememberFocus);
       window.removeEventListener('hyprland-hardware-keyboard', this.hardwareChanged);

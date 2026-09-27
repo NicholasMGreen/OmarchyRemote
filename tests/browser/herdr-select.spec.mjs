@@ -37,27 +37,47 @@ test('Herdr output text can be selected without the composer taking it back', as
   await expect(composer).toBeFocused();
 
   const selected = () => p.evaluate(() => getSelection().toString());
-  // An iOS long press blurs the composer first and selects while the finger is still down.
+  const touch = (row, type) =>
+    row.evaluate((row, type) => {
+      const t = new Touch({ identifier: 1, target: row, clientX: 200, clientY: 10 });
+      const touches = type === 'touchstart' ? [t] : [];
+      row.dispatchEvent(new TouchEvent(type, { touches, changedTouches: [t], bubbles: true }));
+    }, type);
   const row = rows.filter({ hasText: 'first reply line 10 ' });
-  await row.evaluate(row => {
-    const touch = new Touch({ identifier: 1, target: row, clientX: 200, clientY: 10 });
-    row.dispatchEvent(
-      new TouchEvent('touchstart', { touches: [touch], changedTouches: [touch], bubbles: true })
-    );
-    document.activeElement.blur();
-  });
+  // iOS spends the first long press on ending the composer's editing session; nothing is selected.
+  await touch(row, 'touchstart');
+  await p.evaluate(() => document.activeElement.blur());
+  await p.waitForTimeout(600);
+  await touch(row, 'touchend');
   await p.waitForTimeout(300);
-  await row.evaluate(row => {
-    getSelection().selectAllChildren(row);
-    const touch = new Touch({ identifier: 1, target: row, clientX: 200, clientY: 10 });
-    row.dispatchEvent(
-      new TouchEvent('touchend', { touches: [], changedTouches: [touch], bubbles: true })
-    );
-  });
+  expect(await selected()).toBe('');
+  await expect(composer).not.toBeFocused();
+  // So the composer stays unfocused, and the next long press selects.
+  await touch(row, 'touchstart');
+  await p.waitForTimeout(600);
+  await row.evaluate(row => getSelection().selectAllChildren(row));
+  await touch(row, 'touchend');
   await p.waitForTimeout(300);
   expect(await selected()).toContain('first reply line 10');
   await expect(composer).not.toBeFocused();
   await p.evaluate(() => getSelection().removeAllRanges());
+  await p.waitForTimeout(300);
+  await expect(composer).not.toBeFocused();
+  // Typing goes to the composer again.
+  await p.keyboard.type('hi');
+  await expect(composer).toBeFocused();
+  await expect(composer).toHaveValue(/hi$/);
+  // As does a tap on the output, after another long press.
+  await touch(row, 'touchstart');
+  await p.evaluate(() => document.activeElement.blur());
+  await p.waitForTimeout(600);
+  await touch(row, 'touchend');
+  await p.waitForTimeout(300);
+  await expect(composer).not.toBeFocused();
+  const tapped = rows.filter({ hasText: 'first reply line 12 ' });
+  await touch(tapped, 'touchstart');
+  await touch(tapped, 'touchend');
+  await tapped.click();
   await expect(composer).toBeFocused();
 
   // Drag across two lines, as with an iPad trackpad.
