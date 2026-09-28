@@ -221,6 +221,28 @@ for (const width of [402, 1194]) {
     await herdr.locator('.herdr-pane').click();
     const folder = herdr.getByRole('button', { name: 'Open pane folder in Files' });
     await expect(folder).toBeVisible();
+    if (width > 600) {
+      const controls = herdr.locator('.herdr-search-field .herdr-toolbar-key');
+      await expect(controls).toHaveCount(3);
+      const styles = await controls.evaluateAll(elements =>
+        elements.map(el => {
+          const style = getComputedStyle(el);
+          const svg = el.querySelector('svg');
+          return [
+            style.width,
+            style.height,
+            style.color,
+            style.borderRadius,
+            svg.getAttribute('stroke-width'),
+            svg.getAttribute('width'),
+          ];
+        })
+      );
+      expect(styles[1]).toEqual(styles[0]);
+      expect(styles[2]).toEqual(styles[0]);
+      await herdr.getByRole('button', { name: 'Focus pane search' }).click();
+      await expect(herdr.getByRole('searchbox', { name: 'Search panes' })).toBeFocused();
+    }
     await folder.click();
     const files = p.locator('#remote-files-app');
     await expect(files.locator('.files-path')).toHaveAttribute('data-path', home + '/project');

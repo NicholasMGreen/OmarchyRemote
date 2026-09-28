@@ -481,9 +481,10 @@
   flex: none;
   margin-bottom: 12px;
 }
-.herdr-search-field .herdr-new {
-  flex: none;
-  margin-right: -6px;
+.herdr-search-field .herdr-toolbar-key {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
 }
 /* The folder chooser covers the whole Herdr tile; Files' window offsets do not apply. */
 #remote-herdr-app > .herdr-folder-picker {
@@ -587,12 +588,17 @@
 .herdr-detail-bar > button {
   flex: none;
 }
-.herdr-browse,
-.herdr-new-tab {
+.herdr-toolbar-key {
+  flex: none;
   width: 36px;
   height: 36px;
   padding: 0;
-  font-size: 18px;
+  color: var(--theme-secondary);
+}
+.herdr-toolbar-key svg {
+  flex: none;
+  width: 16px;
+  height: 16px;
 }
 .herdr-group-new {
   border: 0;

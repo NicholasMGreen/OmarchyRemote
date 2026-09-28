@@ -778,7 +778,11 @@
       const bar = node('div', 'remote-bar');
       bar.classList.add('herdr-connection');
       bar.append(this.status);
-      // Search sits in a prompt field: the ❯ prefix at the left, a `/` hint at the right.
+      // Header controls share one icon size, stroke and keycap treatment.
+      const toolbarIcon = path =>
+        `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${path}"/></svg>`;
+      const plusIcon = toolbarIcon('M12 5v14M5 12h14');
+      // Search sits in a prompt field; the slash key focuses it.
       this.searchField = node('div', 'prompt-field herdr-search-field');
       this.search = node('input', 'herdr-search');
       this.search.type = 'search';
@@ -787,10 +791,13 @@
         this.listSignature = null;
         this.renderList();
       };
-      const searchKey = node('span', 'kbd', '/');
-      searchKey.setAttribute('aria-hidden', 'true');
+      const searchKey = button('', () => this.search.focus(), 'keycap herdr-toolbar-key');
+      searchKey.innerHTML = toolbarIcon('M15 5 9 19');
+      searchKey.setAttribute('aria-label', 'Focus pane search');
+      searchKey.title = 'Search panes · /';
       this.newButton = button('+', () => this.chooseFolder());
-      this.newButton.classList.add('herdr-new', 'keycap', 'small');
+      this.newButton.classList.add('herdr-new', 'keycap', 'herdr-toolbar-key');
+      this.newButton.innerHTML = plusIcon;
       this.newButton.setAttribute('aria-label', 'New pane in a folder');
       this.newButton.title = 'New pane in a folder';
       this.searchField.append(
@@ -839,7 +846,8 @@
       this.newTabButton = button('+', () =>
         this.newTab(this.snapshot?.panes.find(p => p.pane_id === this.selected))
       );
-      this.newTabButton.classList.add('herdr-new-tab', 'keycap');
+      this.newTabButton.classList.add('herdr-new-tab', 'keycap', 'herdr-toolbar-key');
+      this.newTabButton.innerHTML = plusIcon;
       this.newTabButton.setAttribute('aria-label', 'New tab in this workspace');
       this.newTabButton.title = 'New tab in this workspace';
       this.browseButton = button('', () => {
@@ -847,11 +855,12 @@
         const path = pane?.foreground_cwd || pane?.cwd;
         if (path) HyprlandApps.get('files')?.provider?.openAt(this.bridge, path);
       });
-      this.browseButton.classList.add('herdr-browse', 'keycap');
+      this.browseButton.classList.add('herdr-browse', 'keycap', 'herdr-toolbar-key');
       this.browseButton.setAttribute('aria-label', 'Open pane folder in Files');
       this.browseButton.title = 'Open pane folder in Files';
-      this.browseButton.innerHTML =
-        '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1Z"/></svg>';
+      this.browseButton.innerHTML = toolbarIcon(
+        'M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1Z'
+      );
       this.detailBar.append(
         this.backButton,
         this.detailCenter,

@@ -45,7 +45,7 @@ On an iPad, Omarchy Remote uses the desk layout: tiled windows, workspaces and h
 
 Herdr supports host-transcribed dictation with a microphone button or **⌘⌃X**. It defaults to Voxtype; host administrators can configure another transcription command. See [dictation setup](docs/dictation.md).
 
-Herdr’s folder button opens Files directly in the current pane’s directory, for browsing and previewing files mentioned by an agent.
+Herdr’s sidebar search, new-pane and folder controls share a uniform icon style; the slash button focuses search. Herdr’s folder button opens Files directly in the current pane’s directory, for browsing and previewing files mentioned by an agent.
 
 ## Requirements
 
