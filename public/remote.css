@@ -681,7 +681,7 @@
 /* A full-width tile keeps the pane list as a sidebar beside the selected pane. */
 #remote-herdr-app.herdr-split {
   display: grid;
-  grid-template-columns: 300px minmax(0, 1fr);
+  grid-template-columns: var(--herdr-sidebar-width, 300px) minmax(0, 1fr);
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   column-gap: 14px;
 }
@@ -821,4 +821,50 @@
 .dictation-button[aria-pressed='true'] {
   color: var(--theme-red);
   border-color: currentColor;
+}
+
+.herdr-sidebar-divider {
+  grid-area: 2 / 1 / 5 / 2;
+  justify-self: end;
+  width: 14px;
+  margin-right: -14px;
+  z-index: 2;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+  border-radius: 6px;
+}
+.herdr-sidebar-divider:hover,
+.herdr-sidebar-divider:focus-visible {
+  background: color-mix(in srgb, var(--theme-accent) 20%, transparent);
+}
+.herdr-sidebar-divider[hidden],
+.herdr-toolbar-key[hidden] {
+  display: none;
+}
+#remote-herdr-app.herdr-split.herdr-sidebar-hidden {
+  grid-template-columns: 0 minmax(0, 1fr);
+  column-gap: 0;
+}
+.herdr-split.herdr-sidebar-hidden > .herdr-search-field,
+.herdr-split.herdr-sidebar-hidden > .herdr-list {
+  display: none;
+}
+.herdr-split.herdr-sidebar-narrow > .herdr-search-field {
+  display: grid;
+  grid-template-columns: repeat(4, 32px);
+  height: auto;
+  padding: 6px 12px;
+  gap: 6px;
+}
+.herdr-split.herdr-sidebar-narrow > .herdr-search-field .prompt-prefix {
+  display: none;
+}
+.herdr-split.herdr-sidebar-narrow > .herdr-search-field input {
+  grid-column: 1 / -1;
+  width: 100%;
+  height: 26px;
+}
+.herdr-split.herdr-sidebar-narrow.herdr-sidebar-hidden > .herdr-search-field {
+  display: none;
 }

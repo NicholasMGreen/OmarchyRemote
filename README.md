@@ -47,6 +47,8 @@ Herdr supports host-transcribed dictation with a microphone button or **⌘⌃X*
 
 Herdr’s sidebar search, new-pane and folder controls share a uniform icon style; the slash button focuses search. Herdr’s folder button opens Files directly in the current pane’s directory, for browsing and previewing files mentioned by an agent.
 
+Herdr’s wide-mode sidebar can be resized by dragging its divider, or hidden with the sidebar button. The same button in the pane header restores it. Width and visibility are remembered per device; phone navigation stays unchanged. Focus the divider and use arrow keys to resize, or double-click it to restore the default width.
+
 ## Requirements
 
 - An Omarchy (Arch + Hyprland) host, or any Linux host with systemd user services. The shell reads Omarchy theme files if present and falls back to its bundled palettes.

@@ -861,6 +861,64 @@
       this.browseButton.innerHTML = toolbarIcon(
         'M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1Z'
       );
+      this.sidebarWidth = Number(storage.get('omarchy-herdr-sidebar-width')) || 300;
+      this.sidebarHidden = storage.get('omarchy-herdr-sidebar-hidden') === 'true';
+      this.sidebarToggle = button(
+        '',
+        () => {
+          this.sidebarHidden = !this.sidebarHidden;
+          storage.set('omarchy-herdr-sidebar-hidden', String(this.sidebarHidden));
+          this.syncPanels();
+        },
+        'keycap herdr-toolbar-key'
+      );
+      this.sidebarToggle.innerHTML = toolbarIcon('M4 4h16v16H4zM9 4v16');
+      this.sidebarDivider = node('div', 'herdr-sidebar-divider');
+      this.sidebarDivider.setAttribute('role', 'separator');
+      this.sidebarDivider.setAttribute('aria-label', 'Resize Herdr sidebar');
+      this.sidebarDivider.setAttribute('aria-orientation', 'vertical');
+      this.sidebarDivider.tabIndex = 0;
+      this.sidebarDivider.hidden = true;
+      this.sidebarToggle.hidden = true;
+      for (const type of ['touchstart', 'touchmove', 'touchend', 'click'])
+        this.sidebarDivider.addEventListener(type, e => e.stopPropagation(), { passive: true });
+      this.sidebarDivider.onpointerdown = e => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        this.sidebarDrag = { id: e.pointerId, x: e.clientX, width: this.effectiveSidebarWidth };
+        this.sidebarDivider.setPointerCapture(e.pointerId);
+      };
+      this.sidebarDivider.onpointermove = e => {
+        if (this.sidebarDrag?.id !== e.pointerId) return;
+        e.preventDefault();
+        e.stopPropagation();
+        this.setSidebarWidth(this.sidebarDrag.width + e.clientX - this.sidebarDrag.x);
+      };
+      const finishSidebarDrag = e => {
+        if (this.sidebarDrag?.id !== e.pointerId) return;
+        e.stopPropagation();
+        if (e.type === 'pointercancel') this.setSidebarWidth(this.sidebarDrag.width);
+        this.sidebarDrag = null;
+        storage.set('omarchy-herdr-sidebar-width', String(this.sidebarWidth));
+      };
+      this.sidebarDivider.onpointerup = finishSidebarDrag;
+      this.sidebarDivider.onpointercancel = finishSidebarDrag;
+      this.sidebarDivider.onlostpointercapture = finishSidebarDrag;
+      this.sidebarDivider.ondblclick = () => this.setSidebarWidth(300, true);
+      this.sidebarDivider.onkeydown = e => {
+        const widths = {
+          ArrowLeft: this.effectiveSidebarWidth - 16,
+          ArrowRight: this.effectiveSidebarWidth + 16,
+          Home: 180,
+          End: this.sidebarMax(),
+        };
+        if (!(e.key in widths)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        this.setSidebarWidth(widths[e.key], true);
+      };
+      root.append(this.sidebarDivider);
       this.detailBar.append(
         this.backButton,
         this.detailCenter,
@@ -950,7 +1008,27 @@
       return this.selected ? this.dictation.actions : [];
     }
     // Wide tiles show the whole pane list as a sidebar in place of the list page.
+    sidebarMax() {
+      return Math.max(180, Math.min(440, this.root.clientWidth * 0.45));
+    }
+    setSidebarWidth(width, save = false) {
+      this.sidebarWidth = Math.max(180, Math.min(this.sidebarMax(), width));
+      this.applySidebarWidth();
+      if (save) storage.set('omarchy-herdr-sidebar-width', String(this.sidebarWidth));
+    }
+    applySidebarWidth() {
+      this.effectiveSidebarWidth = Math.max(180, Math.min(this.sidebarMax(), this.sidebarWidth));
+      this.root.style.setProperty('--herdr-sidebar-width', `${this.effectiveSidebarWidth}px`);
+      this.root.classList.toggle('herdr-sidebar-narrow', this.effectiveSidebarWidth < 260);
+      this.sidebarDivider.setAttribute('aria-valuemin', '180');
+      this.sidebarDivider.setAttribute('aria-valuemax', String(Math.round(this.sidebarMax())));
+      this.sidebarDivider.setAttribute(
+        'aria-valuenow',
+        String(Math.round(this.effectiveSidebarWidth))
+      );
+    }
     layout(split) {
+      this.applySidebarWidth();
       if (split === this.split) return;
       this.split = split;
       this.root.classList.toggle('herdr-split', split);
@@ -960,14 +1038,28 @@
     }
     syncPanels() {
       const detail = !this.detail.hidden;
-      this.searchField.hidden = this.list.hidden = detail && !this.split;
+      const collapsed = this.split && this.sidebarHidden && detail;
+      this.root.classList.toggle('herdr-sidebar-hidden', collapsed);
+      this.searchField.hidden = this.list.hidden = detail && (!this.split || collapsed);
       this.placeholder.hidden = detail || !this.split;
       this.browseButton.hidden = !detail;
-      if (this.split) this.searchField.append(this.browseButton);
-      else this.detailBar.insertBefore(this.browseButton, this.newTabButton);
-      // The sidebar already names the pane, so a split tile shows nothing above the output.
-      this.detailBar.hidden = this.backButton.hidden = this.split;
-      this.paneTabs.hidden = this.split || this.tabsRedundant;
+      this.sidebarToggle.hidden = !this.split || !detail;
+      this.sidebarToggle.setAttribute(
+        'aria-label',
+        collapsed ? 'Show Herdr sidebar' : 'Hide Herdr sidebar'
+      );
+      this.sidebarToggle.title = collapsed ? 'Show sidebar' : 'Hide sidebar';
+      this.sidebarToggle.setAttribute('aria-expanded', String(!collapsed));
+      this.sidebarDivider.hidden = !this.split || collapsed;
+      if (this.split && !collapsed) {
+        this.searchField.append(this.browseButton, this.sidebarToggle);
+      } else {
+        this.detailBar.insertBefore(this.browseButton, this.newTabButton);
+        this.detailBar.prepend(this.sidebarToggle);
+      }
+      this.detailBar.hidden = this.split && !collapsed;
+      this.backButton.hidden = this.split;
+      this.paneTabs.hidden = (this.split && !collapsed) || this.tabsRedundant;
       this.title.hidden = !this.paneTabs.hidden;
     }
     connect() {
@@ -1731,6 +1823,15 @@
       )
         return;
       const active = document.activeElement;
+      // Keyboard-operated resize controls own their arrow keys until focus leaves them.
+      if (
+        root.contains(active) &&
+        active.checkVisibility() &&
+        active.matches('[role="separator"][tabindex], [role="slider"][tabindex]')
+      ) {
+        this.cancelNativeFocus();
+        return;
+      }
       if (
         root.contains(active) &&
         active.checkVisibility() &&

@@ -223,7 +223,7 @@ for (const width of [402, 1194]) {
     await expect(folder).toBeVisible();
     if (width > 600) {
       const controls = herdr.locator('.herdr-search-field .herdr-toolbar-key');
-      await expect(controls).toHaveCount(3);
+      await expect(controls).toHaveCount(4);
       const styles = await controls.evaluateAll(elements =>
         elements.map(el => {
           const style = getComputedStyle(el);

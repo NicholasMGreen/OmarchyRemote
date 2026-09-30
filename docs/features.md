@@ -14,6 +14,8 @@ Herdr shows the local running Herdr's workspaces, agents, statuses and panes. Wo
 
 The slash control focuses pane search. Slash, plus and folder controls use matching square keycaps and consistent icon strokes and colors in the sidebar.
 
+Herdr’s wide-mode sidebar can be resized by dragging its divider, or hidden with the sidebar button. The same button in the pane header restores it. Width and visibility are remembered per device; phone navigation stays unchanged. Focus the divider and use arrow keys to resize, or double-click it to restore the default width.
+
 **+** beside the pane search starts a new Herdr workspace. It opens Files as a folder chooser over the Herdr tile: it lists folders only, keeps breadcrumbs and search, and can create a folder, which it then enters. **start here** creates the workspace with its shell in the current folder, names it after the folder, and opens the new pane; the desktop keeps its focus. Folders must be inside the home directory. If Herdr refuses, the chooser stays open with the error. The chooser remembers its last folder separately and does not change the Files app's mode or recents.
 
 **+** at the right of an open pane's header adds a tab to that pane's Herdr workspace. The same chooser opens in the pane's current folder, so **start here** is one tap, and the new tab's pane opens. On a wide tile, where the pane list is a sidebar and the pane has no header, each workspace's header in the sidebar has the **+** instead.
