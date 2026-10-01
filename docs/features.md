@@ -344,3 +344,5 @@ Android update validation covers wrong package and signing-key rejection even wh
 Signed release validation also connects to a real private HTTPS host and verifies live Home survives an in-place update. The userdebug emulator’s forced WebView debugging is recorded separately from the release APK’s nondebuggable configuration.
 
 Android embedded pages keep square top corners beneath visible browser controls and round all corners when the controls are hidden or the page is a saved web app. Native scroll handling follows the toolbar visibility supplied by the shell.
+
+Native visionOS builds are packaged with `scripts/package-ios-app.sh` and published with the same publishing script. The catalog labels them separately from iOS; the headset lists only visionOS builds. These downloads are installed through a paired Mac, so the dashboard does not offer an iOS manifest installer for them.

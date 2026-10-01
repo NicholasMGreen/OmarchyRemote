@@ -110,8 +110,8 @@
       // Desktop clients have no installable builds on the dashboard yet.
       const nativePlatform = this.android
         ? 'android'
-        : window.__OMARCHY_PLATFORM__ === 'desktop'
-          ? 'desktop'
+        : ['desktop', 'visionos'].includes(window.__OMARCHY_PLATFORM__)
+          ? window.__OMARCHY_PLATFORM__
           : 'ios';
       if (window.__HYPRLAND_NATIVE__ || window.webkit?.messageHandlers?.shellInstallBuild)
         builds = builds.filter(build => (build.platform || 'ios') === nativePlatform);
@@ -127,7 +127,7 @@
           node(
             'p',
             'builds-eyebrow',
-            `${index ? 'Previous build' : 'Latest build'} · ${build.platform === 'android' ? 'Android' : 'iOS'}`
+            `${index ? 'Previous build' : 'Latest build'} · ${build.platform === 'android' ? 'Android' : build.platform === 'visionos' ? 'visionOS' : 'iOS'}`
           ),
           node('h2', '', 'Build ' + build.build),
           node('p', 'builds-notes', build.notes || 'No release notes.'),
@@ -151,7 +151,7 @@
           node('code', '', build.sha256)
         );
         card.append(details);
-        if (window.webkit?.messageHandlers?.shellInstallBuild) {
+        if (build.platform !== 'visionos' && window.webkit?.messageHandlers?.shellInstallBuild) {
           const install = button(
             'Install',
             () => this.installBuild(build.id, install),
@@ -171,11 +171,13 @@
         node(
           'p',
           '',
-          window.webkit?.messageHandlers?.shellInstallBuild
-            ? this.android
-              ? 'Tap Install, allow updates from this app if Android asks, then confirm the system installer. Keep Tailscale connected. Installing an update may close this app.'
-              : 'Tap Install on a build and confirm the iOS prompt. Keep Tailscale connected. Updating this app may close it while iOS replaces it.'
-            : 'Open the dashboard in your browser to download an APK, or in Safari to install an iOS build. Keep Tailscale connected.'
+          nativePlatform === 'visionos'
+            ? 'Download the visionOS build from the dashboard and install it using your paired Mac.'
+            : window.webkit?.messageHandlers?.shellInstallBuild
+              ? this.android
+                ? 'Tap Install, allow updates from this app if Android asks, then confirm the system installer. Keep Tailscale connected. Installing an update may close this app.'
+                : 'Tap Install on a build and confirm the iOS prompt. Keep Tailscale connected. Updating this app may close it while iOS replaces it.'
+              : 'Open the dashboard in your browser to download an APK, or in Safari to install an iOS build. Keep Tailscale connected.'
         )
       );
       if (url) {

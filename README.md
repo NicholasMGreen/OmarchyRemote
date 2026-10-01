@@ -396,3 +396,5 @@ Anyone who can reach the address you publish can open a shell as you. Tailscale 
 ## License
 
 [MIT](LICENSE). Bundled third-party components keep their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Native visionOS builds are packaged with `scripts/package-ios-app.sh` and published with the same publishing script. The catalog labels them separately from iOS; the headset lists only visionOS builds. These downloads are installed through a paired Mac, so the dashboard does not offer an iOS manifest installer for them.
