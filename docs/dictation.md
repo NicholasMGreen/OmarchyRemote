@@ -110,3 +110,43 @@ on restart. Audio is served through the authenticated host API, not a public URL
 
 This first version runs while the app is foregrounded. It does not promise a
 screen-locked conversation loop or background microphone capture.
+
+### Local Kokoro speech
+
+Kokoro is an optional CPU speech provider using the same adapter contract. It
+does not change Voxtype dictation or require a new native build. Install its
+Python dependencies and model outside the checkout (run from the repository root):
+
+```sh
+kokoro_dir="$HOME/.local/share/omarchy-remote/kokoro"
+uv venv --python 3.12 "$kokoro_dir/venv"
+uv pip install --python "$kokoro_dir/venv/bin/python" \
+  'kokoro-onnx==0.6.1' 'soundfile==0.13.1'
+mkdir -p "$kokoro_dir/models"
+curl -fL --retry 2 -o "$kokoro_dir/models/kokoro-v1.0.onnx" \
+  https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/kokoro-v1.0.onnx
+curl -fL --retry 2 -o "$kokoro_dir/models/voices-v1.0.bin" \
+  https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1/voices-v1.0.bin
+```
+
+Set `OMARCHY_SPEECH_COMMAND` in the host's private backend environment to a JSON
+argument array containing these entries, replacing the two example paths with
+absolute paths on your host (environment-variable expansion is not performed):
+
+```sh
+OMARCHY_SPEECH_COMMAND='["/absolute/path/to/kokoro/venv/bin/python","/absolute/path/to/OmarchyRemote/scripts/kokoro-speech.py","--text-file","{text}","--wav-file","{audio}","--voice","af_heart"]'
+```
+
+Restart `omarchy-remote.service` after updating its environment. This ends its
+backend-owned terminal shells. Settings reports **Custom command** for this
+adapter; **Read** and Voice mode now use Kokoro. Remove just this override and
+restart to return to Piper; leave your dictation configuration unchanged.
+
+The adapter defaults to the American English `af_heart` voice at speed `1.0`.
+Use `--voice`, `--speed` (0.5–2.0), and `--language` to customize it. Voices must
+match the chosen language; see the [Kokoro voice catalog](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md).
+`--model-dir` changes the model location and `--threads` controls CPU inference
+(four threads by default). Downloads happen only during setup; generation is
+local and produces 24 kHz PCM WAV audio. Each uncached request loads the model
+in its own process, so there is no persistent model service or idle memory use.
+The backend's existing audio cache avoids regenerating identical readbacks.
