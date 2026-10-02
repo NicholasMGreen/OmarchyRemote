@@ -70,6 +70,82 @@ fn find_session(root: &FsPath, id: &str) -> anyhow::Result<PathBuf> {
     );
     Ok(paths[0].clone())
 }
+// Daemon-backed Codex TUIs no longer own rollout file descriptors. The title is
+// supplied by that TUI; match its exact saved name and process cwd, never recency.
+fn codex_named_session(base: &FsPath, cwd: &FsPath, title: &str) -> anyhow::Result<PathBuf> {
+    anyhow::ensure!(
+        !title.trim().is_empty(),
+        "Codex has not reported a conversation name"
+    );
+    let home = base
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("No Codex home"))?;
+    let database = fs::read_dir(home)?
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            let version = name
+                .strip_prefix("state_")?
+                .strip_suffix(".sqlite")?
+                .parse::<u32>()
+                .ok()?;
+            Some((version, entry.path()))
+        })
+        .max_by_key(|(version, _)| *version)
+        .map(|(_, path)| path)
+        .ok_or_else(|| anyhow::anyhow!("No Codex session database"))?;
+    anyhow::ensure!(
+        contained(&database, home),
+        "Codex session database is outside its home"
+    );
+    let connection = rusqlite::Connection::open_with_flags(
+        database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    connection.busy_timeout(std::time::Duration::from_millis(250))?;
+    let suffix = format!(
+        " | {}",
+        cwd.file_name().unwrap_or_default().to_string_lossy()
+    );
+    let name = title.strip_suffix(&suffix).unwrap_or(title);
+    let mut statement = connection.prepare(
+        "SELECT id, rollout_path FROM threads WHERE source = 'cli' AND archived = 0 AND cwd = ?1
+         AND COALESCE(NULLIF(name, ''), title) IN (?2, ?3) LIMIT 2",
+    )?;
+    let matches = statement
+        .query_map(
+            rusqlite::params![cwd.to_string_lossy(), title, name],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    PathBuf::from(row.get::<_, String>(1)?),
+                ))
+            },
+        )?
+        .collect::<Result<Vec<_>, _>>()?;
+    anyhow::ensure!(
+        matches.len() == 1,
+        "No unique named Codex conversation in this pane's directory"
+    );
+    let (id, path) = &matches[0];
+    uuid::Uuid::parse_str(id)?;
+    anyhow::ensure!(
+        contained(path, base),
+        "Conversation log is outside the Codex sessions directory"
+    );
+    use std::io::BufRead;
+    let mut head = String::new();
+    std::io::BufReader::new(fs::File::open(path)?.take(65536)).read_line(&mut head)?;
+    let meta: Value = serde_json::from_str(&head)?;
+    anyhow::ensure!(
+        meta["type"] == "session_meta"
+            && meta["payload"]["source"] == "cli"
+            && meta["payload"]["id"] == *id,
+        "Codex conversation metadata does not match its session record"
+    );
+    Ok(path.clone())
+}
 fn resolve(agent: &str, info: &Value, reported: &Value) -> anyhow::Result<PathBuf> {
     let base = root(agent);
     if let Some(id) = reported["agent_session"]["value"].as_str() {
@@ -79,6 +155,7 @@ fn resolve(agent: &str, info: &Value, reported: &Value) -> anyhow::Result<PathBu
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("No agent process"))?;
     let mut paths = Vec::new();
+    let mut codex_directories = Vec::new();
     for process in processes {
         if !process["name"].as_str().unwrap_or_default().contains(agent) {
             continue;
@@ -107,6 +184,9 @@ fn resolve(agent: &str, info: &Value, reported: &Value) -> anyhow::Result<PathBu
                 }
             }
         } else {
+            if let Ok(cwd) = fs::read_link(format!("/proc/{pid}/cwd")) {
+                codex_directories.push(cwd);
+            }
             for fd in fs::read_dir(format!("/proc/{pid}/fd"))?.flatten() {
                 let Ok(path) = fs::read_link(fd.path()) else {
                     continue;
@@ -130,6 +210,18 @@ fn resolve(agent: &str, info: &Value, reported: &Value) -> anyhow::Result<PathBu
     }
     paths.sort();
     paths.dedup();
+    if paths.is_empty()
+        && agent == "codex"
+        && let Some(title) = reported["terminal_title_stripped"].as_str()
+    {
+        for cwd in codex_directories {
+            if let Ok(path) = codex_named_session(&base, &cwd, title) {
+                paths.push(path);
+            }
+        }
+        paths.sort();
+        paths.dedup();
+    }
     anyhow::ensure!(
         paths.len() == 1,
         "Cannot identify this pane's conversation. Voice supports local Codex and Claude sessions with a unique session identity."
@@ -642,6 +734,62 @@ mod tests {
             ),
             "Result\n\nDone details\nCode block omitted.\nNext paragraph."
         );
+    }
+    #[test]
+    fn daemon_codex_resolves_exact_named_thread_without_an_open_rollout() {
+        let dir = dictation::AudioDir::new().unwrap();
+        let base = dir.0.join("sessions");
+        fs::create_dir(&base).unwrap();
+        let cwd = dir.0.join("project");
+        let id = uuid::Uuid::new_v4().to_string();
+        let path = base.join(format!("rollout-{id}.jsonl"));
+        fs::write(
+            &path,
+            json!({"type":"session_meta","payload":{"id":id,"source":"cli"}}).to_string(),
+        )
+        .unwrap();
+        let db = rusqlite::Connection::open(dir.0.join("state_5.sqlite")).unwrap();
+        db.execute_batch("CREATE TABLE threads(id TEXT, rollout_path TEXT, cwd TEXT, name TEXT, title TEXT, source TEXT, archived INTEGER)").unwrap();
+        db.execute("INSERT INTO threads VALUES (?1, ?2, ?3, 'My conversation', 'Original prompt', 'cli', 0)",
+            rusqlite::params![id, path.to_string_lossy(), cwd.to_string_lossy()]).unwrap();
+        assert_eq!(
+            codex_named_session(&base, &cwd, "My conversation | project").unwrap(),
+            path
+        );
+        assert_eq!(
+            codex_named_session(&base, &cwd, "My conversation").unwrap(),
+            path
+        );
+        assert!(codex_named_session(&base, &cwd, "Some other conversation | project").is_err());
+        assert!(codex_named_session(&base, &dir.0.join("other"), "My conversation").is_err());
+        // A worker or a newer thread in the same folder is never a recency fallback.
+        db.execute("UPDATE threads SET source = 'subagent'", [])
+            .unwrap();
+        assert!(codex_named_session(&base, &cwd, "My conversation").is_err());
+        db.execute("UPDATE threads SET source = 'cli'", []).unwrap();
+        db.execute("INSERT INTO threads SELECT * FROM threads", [])
+            .unwrap();
+        assert!(codex_named_session(&base, &cwd, "My conversation").is_err());
+        db.execute("DELETE FROM threads WHERE rowid = 2", [])
+            .unwrap();
+        db.execute(
+            "UPDATE threads SET rollout_path = ?1",
+            [dir.0.join("outside.jsonl").to_string_lossy()],
+        )
+        .unwrap();
+        assert!(codex_named_session(&base, &cwd, "My conversation").is_err());
+        db.execute(
+            "UPDATE threads SET rollout_path = ?1",
+            [path.to_string_lossy()],
+        )
+        .unwrap();
+        fs::write(
+            &path,
+            json!({"type":"session_meta","payload":{"id":uuid::Uuid::new_v4().to_string(),"source":"cli"}})
+                .to_string(),
+        )
+        .unwrap();
+        assert!(codex_named_session(&base, &cwd, "My conversation").is_err());
     }
     #[test]
     fn resolver_rejects_paths_and_ambiguous_logs() {

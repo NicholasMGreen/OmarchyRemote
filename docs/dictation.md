@@ -78,7 +78,7 @@ preference. Normal dictation still never sends automatically.
 
 Progress and completed answers come from local Codex and Claude conversation logs, not terminal
 screens. Session identity comes from Herdr when available, otherwise the foreground
-Codex process's unique CLI rollout or Claude's PID/session record. Ambiguous or
+Codex process's unique CLI rollout or Claude's PID/session record. For daemon-backed Codex terminals without an open rollout, Voice reads the local session database in read-only mode and requires a unique exact match between the terminal's conversation name and process working directory, then verifies the log's identity. It never picks a conversation merely because it is the newest in a folder. Ambiguous or
 unsupported sessions report an error rather than reading another thread. Worker
 responses, tool calls/results, and reasoning are excluded. Codex commentary messages and Claude’s persisted assistant text blocks are eligible progress; partial streaming text is excluded. Code fences are announced as omitted;
 Markdown links are spoken as their labels. Log formats are agent-version dependent.

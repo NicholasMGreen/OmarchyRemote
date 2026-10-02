@@ -611,6 +611,15 @@ test('Read reports actual play rejection instead of offering an autoplay retry',
 });
 
 async function finishSpeech(page) {
+  // A speech request can arrive before its response has started playing.
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const audio = window.voicePlayer;
+        return audio.src.startsWith('blob:') && !audio.paused;
+      })
+    )
+    .toBe(true);
   await page.evaluate(() => {
     const audio = window.voicePlayer;
     audio.paused = true;
