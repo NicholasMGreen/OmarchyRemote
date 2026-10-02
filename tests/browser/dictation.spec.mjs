@@ -136,11 +136,21 @@ async function voiceSetup(page, width = 402) {
       constructor() {
         this.paused = true;
         this.src = '';
+        window.voicePlayer = this;
+      }
+      set src(value) {
+        this.source = value;
+        this.currentSrc = value;
+        this.error = null;
+        this.ended = false;
+      }
+      get src() {
+        return this.source;
       }
       play() {
         if (window.blockVoicePlayback && this.src.startsWith('blob:')) {
           this.paused = true;
-          return Promise.reject(new Error('User gesture required'));
+          return Promise.reject(new DOMException('User gesture required', 'NotAllowedError'));
         }
         this.paused = false;
         if (window.deferVoicePlayback && this.src.startsWith('blob:')) {
@@ -537,3 +547,63 @@ for (const width of [402, 1194]) {
     await expect(small).toHaveAccessibleName('Start dictation');
   });
 }
+
+test('Read ignores warm-up and stale media events but reports answer playback errors', async ({
+  page,
+}) => {
+  const { app, state } = await voiceSetup(page);
+  let release;
+  const pending = new Promise(resolve => {
+    release = resolve;
+  });
+  await page.route('**/api/herdr/panes/*/response', async r => {
+    await pending;
+    await r.fulfill({ json: state.response });
+  });
+  await app.getByRole('button', { name: 'Read', exact: true }).click();
+  // The initial silent clip can fail to decode without affecting the real answer.
+  await page.evaluate(() => {
+    const audio = window.voicePlayer;
+    if (!audio.src.startsWith('data:audio/')) throw Error('Expected warm-up audio');
+    audio.error = { code: 3 };
+    audio.onerror();
+  });
+  await expect(app.locator('.herdr-voice-status')).toBeHidden();
+  release();
+  await expect(app.getByRole('button', { name: 'Stop speaking' })).toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => window.voicePlays.some(s => s.startsWith('blob:'))))
+    .toBe(true);
+  // A queued old event has no current MediaError and must not hide Stop or flash an error.
+  await page.evaluate(() => {
+    window.voicePlayer.onerror();
+    window.voicePlayer.onended();
+  });
+  await expect(app.locator('.herdr-voice-status')).toBeHidden();
+  await expect(app.getByRole('button', { name: 'Stop speaking' })).toBeVisible();
+  await page.evaluate(() => {
+    window.voicePlayer.error = { code: 3 };
+    window.voicePlayer.onerror();
+  });
+  await expect(app.locator('.herdr-voice-status')).toBeVisible();
+  await expect(app.locator('.herdr-voice-status')).toContainText('Audio playback failed');
+  await expect(app.getByRole('button', { name: 'Stop speaking' })).toBeHidden();
+});
+
+test('Read reports actual play rejection instead of offering an autoplay retry', async ({
+  page,
+}) => {
+  const { app } = await voiceSetup(page);
+  await page.evaluate(() => {
+    const audio = window.voicePlayer;
+    const original = audio.play.bind(audio);
+    audio.play = () =>
+      audio.src.startsWith('blob:')
+        ? Promise.reject(new DOMException('Cannot decode audio', 'NotSupportedError'))
+        : original();
+  });
+  await app.getByRole('button', { name: 'Read', exact: true }).click();
+  await expect(app.locator('.herdr-voice-status')).toContainText('Audio playback failed');
+  await expect(app.locator('.herdr-voice-status')).toBeVisible();
+  await expect(app.getByRole('button', { name: 'Play answer', exact: true })).toHaveCount(0);
+});

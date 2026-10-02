@@ -28,13 +28,19 @@
       outputTools.append(this.replay, this.stop);
       root.append(this.row);
       this.player.onended = () => {
+        if (!this.isAnswerAudio() || !this.player.ended) return;
         this.stop.hidden = true;
         this.status(this.enabled ? 'Ready to talk' : '', false);
       };
       this.player.onerror = () => {
+        // Warm-up and cleared/replaced sources can report late media events.
+        if (!this.isAnswerAudio() || !this.player.error || this.player.error.code === 1) return;
         this.stop.hidden = true;
         this.status('Audio playback failed. Try Read.');
       };
+    }
+    isAnswerAudio() {
+      return !!this.audioURL && this.player.currentSrc === this.audioURL;
     }
     status(text, visible = true) {
       this.message.textContent = text;
@@ -216,6 +222,7 @@
           this.stop.hidden = false;
           this.replay.textContent = 'Read';
           this.needsPlay = false;
+          this.status('Speaking', false);
         } catch {
           if (epoch !== this.epoch || generation !== this.playGeneration) return;
           this.status('Playback unavailable. Try again.');
@@ -265,8 +272,13 @@
           await this.player.play();
           if (epoch !== this.epoch || generation !== this.playGeneration) return;
           this.status('Speaking', false);
-        } catch {
+        } catch (e) {
           if (epoch !== this.epoch || generation !== this.playGeneration) return;
+          if (e.name !== 'NotAllowedError') {
+            this.stop.hidden = true;
+            this.status('Audio playback failed. Try Read.');
+            return;
+          }
           this.status('Answer ready · tap Play answer', false);
           this.replay.textContent = 'Play answer';
           this.needsPlay = true;
