@@ -150,3 +150,56 @@ match the chosen language; see the [Kokoro voice catalog](https://huggingface.co
 local and produces 24 kHz PCM WAV audio. Each uncached request loads the model
 in its own process, so there is no persistent model service or idle memory use.
 The backend's existing audio cache avoids regenerating identical readbacks.
+
+### Local Qwen3-TTS speech
+
+`scripts/qwen-speech.py` supports Qwen3-TTS CustomVoice models through the same
+custom-command setting. The default speaker is **Ryan** (English male), with no
+style instruction. **Aiden** is another English male option. `--speaker`,
+`--language`, and `--instruct` customize the voice; the 1.7B model supports style
+instructions. See the [upstream model guide](https://github.com/QwenLM/Qwen3-TTS).
+
+Install into a separate environment. This example uses the ROCm build for a
+compatible AMD GPU; choose the appropriate [PyTorch build](https://pytorch.org/get-started/locally/)
+for your hardware:
+
+```sh
+qwen_dir="$HOME/.local/share/omarchy-remote/qwen-tts"
+uv venv --python 3.12 "$qwen_dir/venv"
+uv pip install --python "$qwen_dir/venv/bin/python" \
+  'torch==2.10.0+rocm7.1' 'torchaudio==2.10.0+rocm7.1' \
+  --index-url https://download.pytorch.org/whl/rocm7.1
+uv pip install --python "$qwen_dir/venv/bin/python" \
+  'qwen-tts==0.1.1' 'soundfile==0.13.1'
+"$qwen_dir/venv/bin/hf" download Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
+  --revision 0c0e3051f131929182e2c023b9537f8b1c68adfe \
+  --local-dir "$qwen_dir/model"
+```
+
+Use absolute paths in the private host environment:
+
+```sh
+OMARCHY_SPEECH_COMMAND='["/absolute/path/to/qwen-tts/venv/bin/python","/absolute/path/to/OmarchyRemote/scripts/qwen-speech.py","--text-file","{text}","--wav-file","{audio}","--speaker","Ryan"]'
+```
+
+Restart the backend after changing providers. To return to Kokoro, restore its
+command above and restart again. The two installations are independent, and
+dictation remains unchanged. Settings shows **Custom command** for either.
+
+Qwen runs locally with SDPA attention, bfloat16 on GPU (`--device cuda:0`, also
+used by ROCm), or float32 with `--device cpu`. Model downloads happen during
+setup; runtime loads only local files. AMD defaults to MIOpen's `FAST` kernel
+selection to avoid costly convolution benchmarking for each audio length; an
+explicit `MIOPEN_FIND_MODE` environment setting takes precedence.
+The model loads once per uncached
+response and is reused across chunks, preferring paragraph/sentence boundaries.
+Those chunks are joined into one WAV before playback. This adapter is slower
+than Kokoro: benchmark on your host before enabling it. The existing three-minute
+generation deadline still applies, and very long responses may time out.
+
+Run the optional real-model check with the configured environment:
+
+```sh
+OMARCHY_TEST_QWEN=1 "$qwen_dir/venv/bin/python" \
+  -m unittest discover -s scripts -p test_qwen_speech.py
+```
