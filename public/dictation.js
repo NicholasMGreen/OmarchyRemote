@@ -10,17 +10,7 @@
       this.player.preload = 'auto';
       this.row = node('div', 'herdr-voice-status');
       this.row.hidden = true;
-      this.toggleButton = button(
-        'Voice mode',
-        () => {
-          dictation.closeMenu();
-          this.toggle();
-        },
-        'keycap small'
-      );
-      this.toggleButton.setAttribute('aria-label', 'Voice mode');
-      this.toggleButton.setAttribute('aria-pressed', 'false');
-      this.replay = button('Read last', () => this.readLast(), 'keycap small');
+      this.replay = button('Read', () => this.readLast(), 'keycap small');
       this.stop = button('Stop', () => this.stopPlayback(), 'keycap small');
       this.stop.setAttribute('aria-label', 'Stop speaking');
       this.stop.hidden = true;
@@ -36,10 +26,6 @@
       this.dismiss.setAttribute('aria-label', 'Dismiss voice notification');
       this.row.append(this.message, this.dismiss);
       outputTools.append(this.replay, this.stop);
-      dictation.menu.append(
-        this.toggleButton,
-        node('span', 'theme-note', 'Voice mode sends new recordings and reads replies aloud.')
-      );
       root.append(this.row);
       this.player.onended = () => {
         this.stop.hidden = true;
@@ -47,7 +33,7 @@
       };
       this.player.onerror = () => {
         this.stop.hidden = true;
-        this.status('Audio playback failed. Try Read last.');
+        this.status('Audio playback failed. Try Read.');
       };
     }
     status(text, visible = true) {
@@ -78,7 +64,7 @@
       ++this.playGeneration;
       this.player.pause();
       this.needsPlay = false;
-      this.replay.textContent = 'Read last';
+      this.replay.textContent = 'Read';
       this.stop.hidden = true;
       if (this.audioURL) URL.revokeObjectURL(this.audioURL);
       this.audioURL = null;
@@ -95,7 +81,6 @@
       this.abort = new AbortController();
       this.playGeneration = 0;
       this.stopPlayback();
-      this.toggleButton.setAttribute('aria-pressed', 'false');
       this.status('', false);
       this.dictation.syncMicrophone();
     }
@@ -126,7 +111,6 @@
         this.seen = value.answer?.id;
         this.enabled = true;
         this.dictation.syncMicrophone();
-        this.toggleButton.setAttribute('aria-pressed', 'true');
         this.status('Voice on · recordings send automatically', false);
         this.poll();
       } catch (e) {
@@ -229,7 +213,7 @@
           await this.player.play();
           if (epoch !== this.epoch || generation !== this.playGeneration) return;
           this.stop.hidden = false;
-          this.replay.textContent = 'Read last';
+          this.replay.textContent = 'Read';
           this.needsPlay = false;
         } catch {
           if (epoch !== this.epoch || generation !== this.playGeneration) return;
@@ -289,7 +273,7 @@
         }
       } catch (e) {
         if (epoch === this.epoch && generation === this.playGeneration) {
-          this.status(e.message + ' Use Read last to retry.');
+          this.status(e.message + ' Use Read to retry.');
           this.stop.hidden = true;
         }
       } finally {
@@ -313,38 +297,13 @@
       this.button = button('', () => this.toggle(), 'keycap herdr-attach dictation-button');
       this.button.innerHTML =
         '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/></svg>';
-      this.button.onpointerdown = e => e.preventDefault();
-      this.control = node('div', 'dictation-control');
-      this.menuButton = button(
-        '',
-        () => this.setMenu(this.menu.hidden),
-        'keycap dictation-options'
-      );
-      this.menuButton.innerHTML =
-        '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>';
-      this.menuButton.setAttribute('aria-label', 'Microphone options');
-      this.menuButton.setAttribute('aria-expanded', 'false');
-      this.menuButton.onpointerdown = e => e.preventDefault();
-      this.control.append(this.button, this.menuButton);
-      this.menu = node('div', 'dictation-menu');
-      this.menu.hidden = true;
-      this.menu.setAttribute('role', 'group');
-      this.menu.setAttribute('aria-label', 'Microphone options');
-      overlayRoot.append(this.menu);
-      this.outside = e => {
-        if (!this.control.contains(e.target) && !this.menu.contains(e.target)) this.closeMenu();
-      };
+      this.control = this.button;
       this.escape = e => {
-        if (e.key !== 'Escape') return;
-        if (!this.menu.hidden) {
-          this.closeMenu();
-          this.menuButton.focus();
-        } else if (active === this) this.cancel();
-        else return;
+        if (e.key !== 'Escape' || active !== this) return;
+        this.cancel();
         e.preventDefault();
         e.stopImmediatePropagation();
       };
-      document.addEventListener('pointerdown', this.outside);
       document.addEventListener('keydown', this.escape, true);
       this.floatingButton = button('', () => this.toggle(), 'herdr-voice-microphone');
       this.floatingIcon = node('span', 'herdr-voice-microphone-icon');
@@ -352,11 +311,8 @@
       this.floatingCaption = node('span', 'herdr-voice-microphone-caption');
       this.floatingButton.append(this.floatingIcon, this.floatingCaption);
       this.floatingButton.hidden = true;
-      this.floatingButton.onpointerdown = e => {
-        e.preventDefault();
-        e.stopPropagation();
-      };
-      this.floatingButton.addEventListener('click', e => e.stopPropagation());
+      this.bindMicrophone(this.button);
+      this.bindMicrophone(this.floatingButton);
       overlayRoot.append(this.floatingButton);
       this.notice = node('div', 'dictation-notice');
       this.label = node('span');
@@ -374,18 +330,70 @@
       this.voice.reset();
       this.paint('idle');
     }
-    setMenu(open) {
-      this.menu.hidden = !open;
-      this.menuButton.setAttribute('aria-expanded', String(open));
+    bindMicrophone(control) {
+      let press = null;
+      let suppressClick = false;
+      control.style.touchAction = 'none';
+      control.setAttribute(
+        'aria-description',
+        'Tap to record or finish. Hold to toggle Voice mode. With a keyboard, press Shift+Enter.'
+      );
+      control.onpointerdown = e => {
+        if (e.button !== 0 || !e.isPrimary) return;
+        e.preventDefault();
+        e.stopPropagation();
+        suppressClick = false;
+        press = { x: e.clientX, y: e.clientY, time: performance.now() };
+        control.setPointerCapture(e.pointerId);
+      };
+      control.onpointermove = e => {
+        if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 10) {
+          press = null;
+          suppressClick = true;
+        }
+      };
+      control.onpointerup = e => {
+        if (press && performance.now() - press.time >= 550) {
+          suppressClick = true;
+          this.toggleVoice();
+        }
+        press = null;
+        if (control.hasPointerCapture(e.pointerId)) control.releasePointerCapture(e.pointerId);
+      };
+      control.onpointercancel = control.onlostpointercapture = () => {
+        if (press) suppressClick = true;
+        press = null;
+      };
+      control.onclick = e => {
+        e.stopPropagation();
+        if (suppressClick && e.detail !== 0) {
+          suppressClick = false;
+          return;
+        }
+        this.toggle();
+      };
+      control.oncontextmenu = e => {
+        e.preventDefault();
+        e.stopPropagation();
+        // Touch context menus must not toggle twice after a long press.
+        if (e.pointerType === 'mouse') this.toggleVoice();
+      };
+      control.onkeydown = e => {
+        if (e.key !== 'Enter' || !e.shiftKey) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (!e.repeat) this.toggleVoice();
+      };
     }
-    closeMenu() {
-      this.setMenu(false);
+    toggleVoice() {
+      if (!['idle', 'error'].includes(this.state)) return;
+      this.voice.toggle();
     }
     paint(state, message = '') {
       this.state = state;
       const recording = state === 'recording';
       this.button.setAttribute('aria-label', recording ? 'Stop dictation' : 'Start dictation');
-      this.button.title = recording ? 'Stop dictation' : 'Dictate · ⌘⌃X';
+      this.button.title = recording ? 'Stop dictation' : 'Dictate · hold for Voice mode · ⌘⌃X';
       this.button.setAttribute('aria-pressed', String(recording));
       this.button.disabled = ['starting', 'transcribing'].includes(state);
       this.notice.hidden = state !== 'error';
@@ -400,7 +408,6 @@
       this.button.hidden = enabled;
       this.button.dataset.state = this.state;
       this.button.setAttribute('aria-busy', String(busy));
-      this.menuButton.classList.toggle('voice-enabled', enabled);
       this.floatingButton.hidden = !enabled;
       this.floatingButton.disabled = busy;
       this.floatingButton.dataset.state = this.state;
@@ -410,11 +417,12 @@
       );
       this.floatingButton.setAttribute('aria-pressed', String(recording));
       this.floatingButton.setAttribute('aria-busy', String(busy));
-      this.floatingButton.title = recording ? 'Tap to finish recording and send' : 'Tap to talk';
+      this.floatingButton.title = recording
+        ? 'Tap to finish recording and send'
+        : 'Tap to talk · hold to leave Voice mode';
       this.floatingCaption.textContent = recording ? 'Send' : busy ? 'Wait…' : 'Talk';
     }
     async toggle() {
-      this.closeMenu();
       if (this.state === 'recording') {
         this.stop();
         return;
@@ -553,10 +561,8 @@
       document.removeEventListener('visibilitychange', this.background);
       this.voice.dispose();
       this.floatingButton.remove();
-      document.removeEventListener('pointerdown', this.outside);
       document.removeEventListener('keydown', this.escape, true);
       this.control.remove();
-      this.menu.remove();
       this.notice.remove();
     }
   }
@@ -569,7 +575,7 @@
       node(
         'p',
         'theme-note',
-        'Herdr: microphone or ⌘⌃X to start/stop. The host administrator can override Voxtype with OMARCHY_DICTATION_COMMAND.'
+        'Herdr: microphone or ⌘⌃X to start/stop. Hold the microphone to toggle Voice mode (or Shift+Enter with the microphone focused). The host administrator can override Voxtype with OMARCHY_DICTATION_COMMAND.'
       )
     );
     host.append(section);

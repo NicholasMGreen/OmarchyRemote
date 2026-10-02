@@ -184,11 +184,8 @@ async function voiceSetup(page, width = 402) {
 }
 test('voice sends dictation once and reads only a new completed answer', async ({ page }) => {
   const { app, state } = await voiceSetup(page);
-  await app.getByRole('button', { name: 'Microphone options' }).click();
-  await app.getByRole('button', { name: 'Voice mode', includeHidden: true }).click();
-  await expect(
-    app.getByRole('button', { name: 'Voice mode', includeHidden: true })
-  ).toHaveAttribute('aria-pressed', 'true');
+  await app.getByRole('button', { name: 'Start dictation' }).click({ delay: 650 });
+  await expect(app.locator('.herdr-voice-microphone')).toBeVisible();
   await app.getByRole('button', { name: 'Start dictation' }).click();
   await app.getByRole('button', { name: 'Stop dictation' }).click();
   await expect.poll(() => state.sent.length).toBe(1);
@@ -206,16 +203,13 @@ test('voice sends dictation once and reads only a new completed answer', async (
   expect(state.generated).toHaveLength(1);
   await app.getByRole('button', { name: 'Stop speaking' }).click();
   await expect(app.getByRole('button', { name: 'Stop speaking' })).toBeHidden();
-  await app.getByRole('button', { name: 'Read last', exact: true }).click();
+  await app.getByRole('button', { name: 'Read', exact: true }).click();
   await expect.poll(() => state.generated.length).toBe(2);
 });
 test('voice preserves an existing draft instead of automatically sending it', async ({ page }) => {
   const { app, state } = await voiceSetup(page);
-  await app.getByRole('button', { name: 'Microphone options' }).click();
-  await app.getByRole('button', { name: 'Voice mode', includeHidden: true }).click();
-  await expect(
-    app.getByRole('button', { name: 'Voice mode', includeHidden: true })
-  ).toHaveAttribute('aria-pressed', 'true');
+  await app.getByRole('button', { name: 'Start dictation' }).click({ delay: 650 });
+  await expect(app.locator('.herdr-voice-microphone')).toBeVisible();
   await app.locator('textarea.native-input').fill('Unsent thought');
   await app.getByRole('button', { name: 'Start dictation' }).click();
   await app.getByRole('button', { name: 'Stop dictation' }).click();
@@ -227,11 +221,8 @@ test('changing thread during voice transcription keeps a draft and disables voic
   page,
 }) => {
   const { app, state } = await voiceSetup(page);
-  await app.getByRole('button', { name: 'Microphone options' }).click();
-  await app.getByRole('button', { name: 'Voice mode', includeHidden: true }).click();
-  await expect(
-    app.getByRole('button', { name: 'Voice mode', includeHidden: true })
-  ).toHaveAttribute('aria-pressed', 'true');
+  await app.getByRole('button', { name: 'Start dictation' }).click({ delay: 650 });
+  await expect(app.locator('.herdr-voice-microphone')).toBeVisible();
   let release;
   const pending = new Promise(resolve => {
     release = resolve;
@@ -251,9 +242,7 @@ test('changing thread during voice transcription keeps a draft and disables voic
   await expect
     .poll(() => page.evaluate(() => localStorage.getItem('omarchy-herdr-drafts-v1')))
     .toContain('Keep in original thread');
-  await expect(
-    app.getByRole('button', { name: 'Voice mode', includeHidden: true })
-  ).toHaveAttribute('aria-pressed', 'false');
+  await expect(app.locator('.herdr-voice-microphone')).toBeHidden();
   expect(state.sent).toEqual([]);
 });
 test('voice send failure retains the draft without retrying', async ({ page }) => {
@@ -263,11 +252,8 @@ test('voice send failure retains the draft without retrying', async ({ page }) =
     attempts++;
     return r.abort();
   });
-  await app.getByRole('button', { name: 'Microphone options' }).click();
-  await app.getByRole('button', { name: 'Voice mode', includeHidden: true }).click();
-  await expect(
-    app.getByRole('button', { name: 'Voice mode', includeHidden: true })
-  ).toHaveAttribute('aria-pressed', 'true');
+  await app.getByRole('button', { name: 'Start dictation' }).click({ delay: 650 });
+  await expect(app.locator('.herdr-voice-microphone')).toBeVisible();
   await app.getByRole('button', { name: 'Start dictation' }).click();
   await app.getByRole('button', { name: 'Stop dictation' }).click();
   await expect(app.locator('.herdr-voice-status')).toContainText('Could not confirm sending');
@@ -285,7 +271,7 @@ test('stop during speech generation prevents late playback', async ({ page }) =>
     await pending;
     return r.fulfill({ contentType: 'audio/wav', body: 'fixture audio' });
   });
-  await app.getByRole('button', { name: 'Read last', exact: true }).click();
+  await app.getByRole('button', { name: 'Read', exact: true }).click();
   await expect(app.locator('.herdr-voice-status')).toContainText('Generating speech');
   await app.getByRole('button', { name: 'Stop speaking' }).click();
   release();
@@ -295,7 +281,7 @@ test('stop during speech generation prevents late playback', async ({ page }) =>
   );
 });
 
-test('a microphone recording suppresses a late Read last response', async ({ page }) => {
+test('a microphone recording suppresses a late Read response', async ({ page }) => {
   const { app, state } = await voiceSetup(page);
   let release;
   const pending = new Promise(resolve => {
@@ -305,7 +291,7 @@ test('a microphone recording suppresses a late Read last response', async ({ pag
     await pending;
     return r.fulfill({ json: state.response });
   });
-  await app.getByRole('button', { name: 'Read last', exact: true }).click();
+  await app.getByRole('button', { name: 'Read', exact: true }).click();
   await app.getByRole('button', { name: 'Start dictation' }).click();
   await expect(app.getByRole('button', { name: 'Stop dictation' })).toBeVisible();
   release();
@@ -317,7 +303,7 @@ test('blocked autoplay exposes Play answer without regenerating audio', async ({
   await page.evaluate(() => {
     window.blockVoicePlayback = true;
   });
-  await app.getByRole('button', { name: 'Read last', exact: true }).click();
+  await app.getByRole('button', { name: 'Read', exact: true }).click();
   await expect(app.getByRole('button', { name: 'Play answer', exact: true })).toBeVisible();
   await page.evaluate(() => {
     window.blockVoicePlayback = false;
@@ -334,7 +320,7 @@ test('canceling a pending Play answer does not restore stale playback controls',
   await page.evaluate(() => {
     window.blockVoicePlayback = true;
   });
-  await app.getByRole('button', { name: 'Read last', exact: true }).click();
+  await app.getByRole('button', { name: 'Read', exact: true }).click();
   await expect(app.getByRole('button', { name: 'Play answer', exact: true })).toBeVisible();
   await page.evaluate(() => {
     window.blockVoicePlayback = false;
@@ -349,11 +335,8 @@ test('canceling a pending Play answer does not restore stale playback controls',
 
 test('canceling before the voice send check completes never sends', async ({ page }) => {
   const { app, state } = await voiceSetup(page);
-  await app.getByRole('button', { name: 'Microphone options' }).click();
-  await app.getByRole('button', { name: 'Voice mode', includeHidden: true }).click();
-  await expect(
-    app.getByRole('button', { name: 'Voice mode', includeHidden: true })
-  ).toHaveAttribute('aria-pressed', 'true');
+  await app.getByRole('button', { name: 'Start dictation' }).click({ delay: 650 });
+  await expect(app.locator('.herdr-voice-microphone')).toBeVisible();
   await app.getByRole('button', { name: 'Start dictation' }).click();
   let release;
   let checking = false;
@@ -383,8 +366,7 @@ for (const width of [402, 1194]) {
     const small = app.locator('.dictation-button');
     await expect(floating).toBeHidden();
     await expect(small).toBeVisible();
-    await app.getByRole('button', { name: 'Microphone options' }).click();
-    await app.getByRole('button', { name: 'Voice mode', includeHidden: true }).click();
+    await app.getByRole('button', { name: 'Start dictation' }).click({ delay: 650 });
     await expect(floating).toBeVisible();
     await expect(small).toBeHidden();
     await expect(floating).toHaveText('Talk');
@@ -417,7 +399,7 @@ for (const width of [402, 1194]) {
     await expect(floating).toHaveText('Talk');
     await page.screenshot({ path: `artifacts/voice-floating-ready-${width}.png` });
     // A tap to speak must stop current audio before the microphone opens.
-    await app.getByRole('button', { name: 'Read last', exact: true }).click();
+    await app.getByRole('button', { name: 'Read', exact: true }).click();
     await expect(app.getByRole('button', { name: 'Stop speaking' })).toBeVisible();
     await page.unroute('**/api/dictation');
     await page.route('**/api/dictation', r => r.fulfill({ json: { available: true } }));
@@ -425,8 +407,7 @@ for (const width of [402, 1194]) {
     await expect(floating).toHaveText('Send');
     await expect(app.getByRole('button', { name: 'Stop speaking' })).toBeHidden();
     await page.keyboard.press('Escape');
-    await app.getByRole('button', { name: 'Microphone options' }).click();
-    await app.getByRole('button', { name: 'Voice mode', includeHidden: true }).click();
+    await app.getByRole('button', { name: 'Start dictation' }).click({ delay: 650 });
     await expect(floating).toBeHidden();
     await expect(small).toBeVisible();
   });
@@ -437,14 +418,10 @@ for (const width of [402, 1194]) {
     const { app } = await voiceSetup(page, width);
     const output = app.locator('.herdr-output');
     const initial = await output.boundingBox();
-    const replay = app.getByRole('button', { name: 'Read last', exact: true });
+    const replay = app.getByRole('button', { name: 'Read', exact: true });
     const fit = app.locator('.herdr-output-tools').getByRole('button', { name: /Fit|Original/ });
     expect((await replay.boundingBox()).y).toBe((await fit.boundingBox()).y);
-    await app.getByRole('button', { name: 'Microphone options' }).click();
-    await expect(app.getByRole('button', { name: 'Voice mode' })).toBeVisible();
-    expect(await output.boundingBox()).toEqual(initial);
-    await page.keyboard.press('Escape');
-    await expect(app.locator('.dictation-menu')).toBeHidden();
+    await expect(app.getByRole('button', { name: 'Microphone options' })).toHaveCount(0);
     await app.getByRole('button', { name: 'Start dictation' }).click();
     await expect(app.getByRole('button', { name: 'Stop dictation' })).toBeVisible();
     await expect(app.locator('.dictation-notice')).toBeHidden();
@@ -459,3 +436,32 @@ for (const width of [402, 1194]) {
     expect(await output.boundingBox()).toEqual(initial);
   });
 }
+
+test('holding toggles Voice without recording; dragging cancels and keyboard is equivalent', async ({
+  page,
+}) => {
+  const { app, state } = await voiceSetup(page);
+  const small = app.locator('.dictation-button');
+  const floating = app.locator('.herdr-voice-microphone');
+  await small.click({ delay: 650 });
+  await expect(floating).toBeVisible();
+  await expect(floating).toHaveText('Talk');
+  await floating.click({ delay: 650 });
+  await expect(floating).toBeHidden();
+  await expect(small).toHaveAttribute('aria-pressed', 'false');
+  const box = await small.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width + 20, box.y + box.height / 2);
+  await page.waitForTimeout(650);
+  await page.mouse.up();
+  await expect(floating).toBeHidden();
+  await expect(small).toHaveAttribute('aria-pressed', 'false');
+  await small.focus();
+  await page.keyboard.press('Shift+Enter');
+  await expect(floating).toBeVisible();
+  await floating.focus();
+  await page.keyboard.press('Shift+Enter');
+  await expect(floating).toBeHidden();
+  expect(state.sent).toEqual([]);
+});

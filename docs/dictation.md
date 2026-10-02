@@ -62,9 +62,9 @@ to the host and does not replace Apple's keyboard microphone globally.
 
 ## Voice conversations
 
-**Voice mode** in the microphone’s chevron menu enables a conversation loop using the same microphone:
+Hold the microphone to enable **Voice mode**, or hold the large microphone to turn it off. Keyboard users can focus the microphone and press **Shift+Enter**. Voice mode enables a conversation loop using the same microphone:
 record, press again to transcribe, send, wait for the completed answer, and listen.
-The host generates one WAV for the whole response. **Read last** works without
+The host generates one WAV for the whole response. **Read** works without
 Voice mode; **Stop** stops playback or suppresses an in-flight generation. Starting
 a recording also stops playback. If the device blocks automatic audio, **Play
 answer** starts the ready recording explicitly.

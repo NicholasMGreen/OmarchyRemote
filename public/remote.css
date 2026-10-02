@@ -871,23 +871,6 @@
 }
 
 /* Voice controls never reserve a row above the composer. */
-.dictation-control {
-  display: flex;
-  align-items: center;
-  flex: none;
-  gap: 2px;
-}
-.dictation-options {
-  min-width: 28px;
-  min-height: 36px;
-  padding: 4px;
-}
-.dictation-options.voice-enabled,
-.dictation-menu [aria-pressed='true'] {
-  color: var(--theme-accent);
-  border-color: currentColor;
-}
-.dictation-menu,
 .dictation-notice,
 .herdr-voice-status {
   position: absolute;
@@ -902,19 +885,18 @@
   color: var(--theme-foreground);
   box-shadow: 0 4px 16px #0004;
 }
-.dictation-menu {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
 .herdr-voice-status {
   display: flex;
   align-items: center;
   gap: 8px;
 }
-.dictation-menu[hidden],
 .herdr-voice-status[hidden] {
   display: none;
+}
+.dictation-button,
+.herdr-voice-microphone {
+  -webkit-touch-callout: none;
+  user-select: none;
 }
 .dictation-button[data-state='recording'] svg {
   background: currentColor;
