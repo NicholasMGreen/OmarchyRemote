@@ -926,7 +926,9 @@
         this.newTabButton,
         this.filePicker
       );
+      this.outputStage = node('div', 'herdr-output-stage');
       this.output = node('div', 'herdr-output');
+      this.outputStage.append(this.output);
       this.canvas = node('div', 'herdr-canvas');
       // Fit and ↓ Latest float inside the output panel's bottom-right corner.
       this.outputTools = node('div', 'herdr-output-tools');
@@ -957,7 +959,7 @@
       this.promptField.setAttribute('aria-label', 'Type a message');
       this.promptField.append(node('span', 'prompt-prefix', '❯'), node('i', 'herdr-caret'));
       this.promptRow.append(this.attachButton, this.promptField);
-      this.detail.append(this.detailBar, this.metadata, this.output, inputBar, this.promptRow);
+      this.detail.append(this.detailBar, this.metadata, this.outputStage, inputBar, this.promptRow);
       this.term = terminal(this.canvas, true);
       this.fit = new FitAddon.FitAddon();
       this.term.loadAddon(this.fit);
@@ -985,7 +987,12 @@
         { dismissOnSend: true, compactControls: true, draftStore: 'omarchy-herdr-drafts-v1' }
       );
       this.nativeInput.select(this.selected);
-      this.dictation = new HyprlandDictation(this.nativeInput, () => this.selected, inputBar);
+      this.dictation = new HyprlandDictation(
+        this.nativeInput,
+        () => this.selected,
+        inputBar,
+        this.outputStage
+      );
       this.promptRow.append(this.dictation.button);
       this.nativeInput.field.addEventListener('paste', e => {
         const files = [...(e.clipboardData?.items || [])]

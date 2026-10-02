@@ -70,6 +70,7 @@
       this.stopPlayback();
       this.toggleButton.setAttribute('aria-pressed', 'false');
       this.message.textContent = '';
+      this.dictation.syncMicrophone();
     }
     // Prime this audio element during a user gesture. Platforms that still block playback
     // get an explicit Play answer button; never silently drop a completed answer.
@@ -97,6 +98,7 @@
         this.session = value.session;
         this.seen = value.answer?.id;
         this.enabled = true;
+        this.dictation.syncMicrophone();
         this.toggleButton.setAttribute('aria-pressed', 'true');
         this.message.textContent = 'Voice on · recordings send automatically';
         this.poll();
@@ -277,7 +279,7 @@
   }
 
   class Dictation {
-    constructor(input, getTarget, statusRoot) {
+    constructor(input, getTarget, statusRoot, overlayRoot) {
       this.input = input;
       this.getTarget = getTarget;
       this.state = 'idle';
@@ -286,6 +288,18 @@
       this.button.innerHTML =
         '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/></svg>';
       this.button.onpointerdown = e => e.preventDefault();
+      this.floatingButton = button('', () => this.toggle(), 'herdr-voice-microphone');
+      this.floatingIcon = node('span', 'herdr-voice-microphone-icon');
+      this.floatingIcon.innerHTML = this.button.innerHTML;
+      this.floatingCaption = node('span', 'herdr-voice-microphone-caption');
+      this.floatingButton.append(this.floatingIcon, this.floatingCaption);
+      this.floatingButton.hidden = true;
+      this.floatingButton.onpointerdown = e => {
+        e.preventDefault();
+        e.stopPropagation();
+      };
+      this.floatingButton.addEventListener('click', e => e.stopPropagation());
+      overlayRoot.append(this.floatingButton);
       this.notice = node('div', 'dictation-notice');
       this.label = node('span');
       this.label.setAttribute('role', 'status');
@@ -312,6 +326,24 @@
       this.label.textContent = message;
       this.retryButton.hidden = state !== 'error' || !this.audio;
       this.cancelButton.textContent = state === 'error' ? 'Dismiss' : 'Cancel';
+      this.syncMicrophone();
+    }
+    syncMicrophone() {
+      const enabled = !!this.voice?.enabled;
+      const recording = this.state === 'recording';
+      const busy = ['starting', 'transcribing'].includes(this.state);
+      this.button.hidden = enabled;
+      this.floatingButton.hidden = !enabled;
+      this.floatingButton.disabled = busy;
+      this.floatingButton.dataset.state = this.state;
+      this.floatingButton.setAttribute(
+        'aria-label',
+        recording ? 'Stop dictation' : 'Start dictation'
+      );
+      this.floatingButton.setAttribute('aria-pressed', String(recording));
+      this.floatingButton.setAttribute('aria-busy', String(busy));
+      this.floatingButton.title = recording ? 'Tap to finish recording and send' : 'Tap to talk';
+      this.floatingCaption.textContent = recording ? 'Send' : busy ? 'Wait…' : 'Talk';
     }
     async toggle() {
       if (this.state === 'recording') {
@@ -451,6 +483,7 @@
       this.cancel();
       document.removeEventListener('visibilitychange', this.background);
       this.voice.dispose();
+      this.floatingButton.remove();
       this.button.remove();
       this.notice.remove();
     }
