@@ -1,7 +1,7 @@
 # Dictation
 
 In an open Herdr pane, tap the microphone or press **Command+Control+X** to record;
-press again to transcribe. Cancel discards the recording. The transcript appends
+press again to transcribe. Escape discards the recording. The transcript appends
 to that pane's saved draft, preserving edits made while waiting. It never sends
 terminal input automatically. Settings shows the connected host's provider status.
 
@@ -62,7 +62,7 @@ to the host and does not replace Apple's keyboard microphone globally.
 
 ## Voice conversations
 
-**Voice** in a Herdr pane enables a conversation loop using the same microphone:
+**Voice mode** in the microphone’s chevron menu enables a conversation loop using the same microphone:
 record, press again to transcribe, send, wait for the completed answer, and listen.
 The host generates one WAV for the whole response. **Read last** works without
 Voice mode; **Stop** stops playback or suppresses an in-flight generation. Starting

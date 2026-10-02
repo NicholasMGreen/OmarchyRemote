@@ -934,7 +934,10 @@
       this.outputTools = node('div', 'herdr-output-tools');
       this.fitButton.classList.add('keycap', 'small');
       this.outputTools.append(this.fitButton);
-      this.output.append(this.canvas, this.outputTools);
+      this.output.append(this.canvas);
+      this.outputStage.append(this.outputTools);
+      this.outputTools.onpointerdown = e => e.preventDefault();
+      this.outputTools.onclick = e => e.stopPropagation();
       this.followOutput = true;
       this.latest = button('↓ Latest', () => {
         this.showLatest();
@@ -990,10 +993,10 @@
       this.dictation = new HyprlandDictation(
         this.nativeInput,
         () => this.selected,
-        inputBar,
-        this.outputStage
+        this.outputStage,
+        this.outputTools
       );
-      this.promptRow.append(this.dictation.button);
+      this.promptRow.append(this.dictation.control);
       this.nativeInput.field.addEventListener('paste', e => {
         const files = [...(e.clipboardData?.items || [])]
           .filter(i => i.kind === 'file')
@@ -1401,11 +1404,11 @@
       this.promptRow.hidden = composing;
       if (composing) {
         this.nativeInput.row.insertBefore(this.attachButton, this.nativeInput.field);
-        this.nativeInput.row.insertBefore(this.dictation.button, this.nativeInput.field);
+        this.nativeInput.row.insertBefore(this.dictation.control, this.nativeInput.field);
         this.nativeInput.header.insertBefore(this.latest, this.nativeInput.hideButton);
       } else {
         this.promptRow.prepend(this.attachButton);
-        this.promptRow.append(this.dictation.button);
+        this.promptRow.append(this.dictation.control);
         this.outputTools.append(this.latest);
       }
     }

@@ -3,13 +3,21 @@
   const { node, button } = HyprlandUtil;
   let active = null;
   class Voice {
-    constructor(dictation, root) {
+    constructor(dictation, root, outputTools) {
       this.dictation = dictation;
       this.epoch = 0;
       this.player = new Audio();
       this.player.preload = 'auto';
-      this.row = node('div', 'herdr-voice-controls');
-      this.toggleButton = button('Voice', () => this.toggle(), 'keycap small');
+      this.row = node('div', 'herdr-voice-status');
+      this.row.hidden = true;
+      this.toggleButton = button(
+        'Voice mode',
+        () => {
+          dictation.closeMenu();
+          this.toggle();
+        },
+        'keycap small'
+      );
       this.toggleButton.setAttribute('aria-label', 'Voice mode');
       this.toggleButton.setAttribute('aria-pressed', 'false');
       this.replay = button('Read last', () => this.readLast(), 'keycap small');
@@ -18,16 +26,35 @@
       this.stop.hidden = true;
       this.message = node('span', 'remote-status');
       this.message.setAttribute('role', 'status');
-      this.row.append(this.toggleButton, this.replay, this.stop, this.message);
+      this.dismiss = button(
+        '×',
+        () => {
+          this.row.hidden = true;
+        },
+        'keycap small'
+      );
+      this.dismiss.setAttribute('aria-label', 'Dismiss voice notification');
+      this.row.append(this.message, this.dismiss);
+      outputTools.append(this.replay, this.stop);
+      dictation.menu.append(
+        this.toggleButton,
+        node('span', 'theme-note', 'Voice mode sends new recordings and reads replies aloud.')
+      );
       root.append(this.row);
       this.player.onended = () => {
         this.stop.hidden = true;
-        this.message.textContent = this.enabled ? 'Ready to talk' : '';
+        this.status(this.enabled ? 'Ready to talk' : '', false);
       };
       this.player.onerror = () => {
         this.stop.hidden = true;
-        this.message.textContent = 'Audio playback failed. Try Read last.';
+        this.status('Audio playback failed. Try Read last.');
       };
+    }
+    status(text, visible = true) {
+      this.message.textContent = text;
+      this.row.hidden = !text || !visible;
+      this.replay.title = text || 'Read the last response';
+      this.replay.setAttribute('aria-busy', String(text === 'Generating speech on host…'));
     }
     async request(path, options = {}) {
       const response = await fetch(path, {
@@ -56,7 +83,7 @@
       if (this.audioURL) URL.revokeObjectURL(this.audioURL);
       this.audioURL = null;
       this.player.removeAttribute('src');
-      this.message.textContent = this.enabled ? 'Ready to talk' : '';
+      this.status(this.enabled ? 'Ready to talk' : '', false);
     }
     reset() {
       ++this.epoch;
@@ -69,7 +96,7 @@
       this.playGeneration = 0;
       this.stopPlayback();
       this.toggleButton.setAttribute('aria-pressed', 'false');
-      this.message.textContent = '';
+      this.status('', false);
       this.dictation.syncMicrophone();
     }
     // Prime this audio element during a user gesture. Platforms that still block playback
@@ -88,7 +115,7 @@
       const pane = this.dictation.getTarget();
       if (!pane) return;
       this.loading = true;
-      this.message.textContent = 'Checking voice…';
+      this.status('Checking voice…', false);
       try {
         const provider = await (await this.request('/api/voice')).json();
         if (!provider.available) throw Error(provider.message);
@@ -100,10 +127,10 @@
         this.enabled = true;
         this.dictation.syncMicrophone();
         this.toggleButton.setAttribute('aria-pressed', 'true');
-        this.message.textContent = 'Voice on · recordings send automatically';
+        this.status('Voice on · recordings send automatically', false);
         this.poll();
       } catch (e) {
-        if (epoch === this.epoch) this.message.textContent = e.message;
+        if (epoch === this.epoch) this.status(e.message);
       } finally {
         if (epoch === this.epoch) this.loading = false;
       }
@@ -117,7 +144,7 @@
           if (epoch !== this.epoch || this.dictation.state !== 'idle' || document.hidden) return;
           if (value.session !== this.session) {
             this.reset();
-            this.message.textContent = 'Conversation changed. Enable Voice again.';
+            this.status('Conversation changed. Enable Voice again.');
             return;
           }
           if (!value.working && value.answer?.id && value.answer.id !== this.seen) {
@@ -126,7 +153,7 @@
           }
         }
       } catch (e) {
-        if (epoch === this.epoch) this.message.textContent = e.message;
+        if (epoch === this.epoch) this.status(e.message);
       } finally {
         if (epoch === this.epoch && this.enabled) this.timer = setTimeout(() => this.poll(), 3000);
       }
@@ -152,7 +179,7 @@
         context.draft.trim() ||
         input.draft !== text
       ) {
-        this.message.textContent = 'Saved as a draft; review and send when ready.';
+        this.status('Saved as a draft; review and send when ready.');
         return;
       }
       try {
@@ -170,8 +197,7 @@
           latest.working ||
           input.draft !== text
         ) {
-          this.message.textContent =
-            'Saved as a draft; the agent is busy or the conversation changed.';
+          this.status('Saved as a draft; the agent is busy or the conversation changed.');
           return;
         }
         // Explicit REST acknowledgement; never retry a send after a lost connection.
@@ -185,17 +211,15 @@
           input.storeDraft(context.pane, '');
           input.dismiss();
         }
-        if (context.epoch === this.epoch)
-          this.message.textContent = 'Sent · waiting for the answer';
+        if (context.epoch === this.epoch) this.status('Sent · waiting for the answer', false);
       } catch (e) {
         if (context.epoch === this.epoch)
-          this.message.textContent =
-            'Could not confirm sending. Draft kept; check the thread before retrying.';
+          this.status('Could not confirm sending. Draft kept; check the thread before retrying.');
       }
     }
     async readLast() {
       if (this.dictation.state !== 'idle') {
-        this.message.textContent = 'Finish or cancel dictation before playing an answer.';
+        this.status('Finish dictation before playing an answer.');
         return;
       }
       if (this.needsPlay && this.audioURL && this.player.paused) {
@@ -209,7 +233,7 @@
           this.needsPlay = false;
         } catch {
           if (epoch !== this.epoch || generation !== this.playGeneration) return;
-          this.message.textContent = 'Playback unavailable. Try again.';
+          this.status('Playback unavailable. Try again.');
         }
         return;
       }
@@ -228,7 +252,7 @@
         if (!value.answer?.id) throw Error('No completed response yet.');
         await this.speak(pane, value.answer.id);
       } catch (e) {
-        if (epoch === this.epoch) this.message.textContent = e.message;
+        if (epoch === this.epoch) this.status(e.message);
       }
     }
     async speak(pane, id) {
@@ -237,7 +261,7 @@
       const generation = this.playGeneration;
       this.speaking = true;
       this.stop.hidden = false;
-      this.message.textContent = 'Generating speech on host…';
+      this.status('Generating speech on host…', false);
       try {
         const response = await this.request(this.path(pane, 'speech'), {
           method: 'POST',
@@ -255,17 +279,17 @@
         try {
           await this.player.play();
           if (epoch !== this.epoch || generation !== this.playGeneration) return;
-          this.message.textContent = 'Speaking';
+          this.status('Speaking', false);
         } catch {
           if (epoch !== this.epoch || generation !== this.playGeneration) return;
-          this.message.textContent = 'Answer ready · tap Play answer';
+          this.status('Answer ready · tap Play answer', false);
           this.replay.textContent = 'Play answer';
           this.needsPlay = true;
           this.stop.hidden = true;
         }
       } catch (e) {
         if (epoch === this.epoch && generation === this.playGeneration) {
-          this.message.textContent = e.message + ' Use Read last to retry.';
+          this.status(e.message + ' Use Read last to retry.');
           this.stop.hidden = true;
         }
       } finally {
@@ -275,11 +299,13 @@
     dispose() {
       this.reset();
       this.row.remove();
+      this.replay.remove();
+      this.stop.remove();
     }
   }
 
   class Dictation {
-    constructor(input, getTarget, statusRoot, overlayRoot) {
+    constructor(input, getTarget, overlayRoot, outputTools) {
       this.input = input;
       this.getTarget = getTarget;
       this.state = 'idle';
@@ -288,6 +314,38 @@
       this.button.innerHTML =
         '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/></svg>';
       this.button.onpointerdown = e => e.preventDefault();
+      this.control = node('div', 'dictation-control');
+      this.menuButton = button(
+        '',
+        () => this.setMenu(this.menu.hidden),
+        'keycap dictation-options'
+      );
+      this.menuButton.innerHTML =
+        '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>';
+      this.menuButton.setAttribute('aria-label', 'Microphone options');
+      this.menuButton.setAttribute('aria-expanded', 'false');
+      this.menuButton.onpointerdown = e => e.preventDefault();
+      this.control.append(this.button, this.menuButton);
+      this.menu = node('div', 'dictation-menu');
+      this.menu.hidden = true;
+      this.menu.setAttribute('role', 'group');
+      this.menu.setAttribute('aria-label', 'Microphone options');
+      overlayRoot.append(this.menu);
+      this.outside = e => {
+        if (!this.control.contains(e.target) && !this.menu.contains(e.target)) this.closeMenu();
+      };
+      this.escape = e => {
+        if (e.key !== 'Escape') return;
+        if (!this.menu.hidden) {
+          this.closeMenu();
+          this.menuButton.focus();
+        } else if (active === this) this.cancel();
+        else return;
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      };
+      document.addEventListener('pointerdown', this.outside);
+      document.addEventListener('keydown', this.escape, true);
       this.floatingButton = button('', () => this.toggle(), 'herdr-voice-microphone');
       this.floatingIcon = node('span', 'herdr-voice-microphone-icon');
       this.floatingIcon.innerHTML = this.button.innerHTML;
@@ -303,17 +361,25 @@
       this.notice = node('div', 'dictation-notice');
       this.label = node('span');
       this.label.setAttribute('role', 'status');
-      this.cancelButton = button('Cancel', () => this.cancel(), 'keycap small');
+      this.dismissButton = button('×', () => this.cancel(), 'keycap small');
+      this.dismissButton.setAttribute('aria-label', 'Dismiss dictation error');
       this.retryButton = button('Retry', () => this.transcribe(), 'keycap small');
-      this.notice.append(this.label, this.retryButton, this.cancelButton);
-      statusRoot.append(this.notice);
+      this.notice.append(this.label, this.retryButton, this.dismissButton);
+      overlayRoot.append(this.notice);
       this.background = () => {
         if (document.hidden && ['starting', 'recording'].includes(this.state)) this.cancel();
       };
       document.addEventListener('visibilitychange', this.background);
-      this.voice = new Voice(this, statusRoot);
+      this.voice = new Voice(this, overlayRoot, outputTools);
       this.voice.reset();
       this.paint('idle');
+    }
+    setMenu(open) {
+      this.menu.hidden = !open;
+      this.menuButton.setAttribute('aria-expanded', String(open));
+    }
+    closeMenu() {
+      this.setMenu(false);
     }
     paint(state, message = '') {
       this.state = state;
@@ -322,10 +388,9 @@
       this.button.title = recording ? 'Stop dictation' : 'Dictate · ⌘⌃X';
       this.button.setAttribute('aria-pressed', String(recording));
       this.button.disabled = ['starting', 'transcribing'].includes(state);
-      this.notice.hidden = state === 'idle';
+      this.notice.hidden = state !== 'error';
       this.label.textContent = message;
       this.retryButton.hidden = state !== 'error' || !this.audio;
-      this.cancelButton.textContent = state === 'error' ? 'Dismiss' : 'Cancel';
       this.syncMicrophone();
     }
     syncMicrophone() {
@@ -333,6 +398,9 @@
       const recording = this.state === 'recording';
       const busy = ['starting', 'transcribing'].includes(this.state);
       this.button.hidden = enabled;
+      this.button.dataset.state = this.state;
+      this.button.setAttribute('aria-busy', String(busy));
+      this.menuButton.classList.toggle('voice-enabled', enabled);
       this.floatingButton.hidden = !enabled;
       this.floatingButton.disabled = busy;
       this.floatingButton.dataset.state = this.state;
@@ -346,6 +414,7 @@
       this.floatingCaption.textContent = recording ? 'Send' : busy ? 'Wait…' : 'Talk';
     }
     async toggle() {
+      this.closeMenu();
       if (this.state === 'recording') {
         this.stop();
         return;
@@ -484,7 +553,10 @@
       document.removeEventListener('visibilitychange', this.background);
       this.voice.dispose();
       this.floatingButton.remove();
-      this.button.remove();
+      document.removeEventListener('pointerdown', this.outside);
+      document.removeEventListener('keydown', this.escape, true);
+      this.control.remove();
+      this.menu.remove();
       this.notice.remove();
     }
   }
