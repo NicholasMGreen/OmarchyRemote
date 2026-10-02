@@ -295,8 +295,11 @@
       this.state = 'idle';
       this.generation = 0;
       this.button = button('', () => this.toggle(), 'keycap herdr-attach dictation-button');
-      this.button.innerHTML =
+      this.microphoneIcon =
         '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/></svg>';
+      this.headphonesIcon =
+        '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 14v-3a8 8 0 0 1 16 0v3"/><rect x="3" y="12" width="4" height="9" rx="2"/><rect x="17" y="12" width="4" height="9" rx="2"/></svg>';
+      this.button.innerHTML = this.microphoneIcon;
       this.control = this.button;
       this.escape = e => {
         if (e.key !== 'Escape' || active !== this) return;
@@ -370,7 +373,8 @@
           suppressClick = false;
           return;
         }
-        this.toggle();
+        if (control === this.button && this.voice.enabled) this.toggleVoice();
+        else this.toggle();
       };
       control.oncontextmenu = e => {
         e.preventDefault();
@@ -386,16 +390,16 @@
       };
     }
     toggleVoice() {
+      if (this.voice.enabled) {
+        this.cancel();
+        this.voice.reset();
+        return;
+      }
       if (!['idle', 'error'].includes(this.state)) return;
       this.voice.toggle();
     }
     paint(state, message = '') {
       this.state = state;
-      const recording = state === 'recording';
-      this.button.setAttribute('aria-label', recording ? 'Stop dictation' : 'Start dictation');
-      this.button.title = recording ? 'Stop dictation' : 'Dictate · hold for Voice mode · ⌘⌃X';
-      this.button.setAttribute('aria-pressed', String(recording));
-      this.button.disabled = ['starting', 'transcribing'].includes(state);
       this.notice.hidden = state !== 'error';
       this.label.textContent = message;
       this.retryButton.hidden = state !== 'error' || !this.audio;
@@ -405,9 +409,27 @@
       const enabled = !!this.voice?.enabled;
       const recording = this.state === 'recording';
       const busy = ['starting', 'transcribing'].includes(this.state);
-      this.button.hidden = enabled;
-      this.button.dataset.state = this.state;
-      this.button.setAttribute('aria-busy', String(busy));
+      this.button.innerHTML = enabled ? this.headphonesIcon : this.microphoneIcon;
+      this.button.dataset.mode = enabled ? 'voice' : 'dictation';
+      this.button.dataset.state = enabled ? 'idle' : this.state;
+      this.button.setAttribute(
+        'aria-label',
+        enabled ? 'Turn off Voice mode' : recording ? 'Stop dictation' : 'Start dictation'
+      );
+      this.button.title = enabled
+        ? 'Voice mode on · tap to turn off'
+        : recording
+          ? 'Stop dictation'
+          : 'Dictate · hold for Voice mode · ⌘⌃X';
+      this.button.setAttribute(
+        'aria-description',
+        enabled
+          ? 'Tap to turn off Voice mode and stop recording or playback.'
+          : 'Tap to record or finish. Hold for Voice mode, or press Shift+Enter.'
+      );
+      this.button.setAttribute('aria-pressed', String(enabled || recording));
+      this.button.disabled = busy && !enabled;
+      this.button.setAttribute('aria-busy', String(busy && !enabled));
       this.floatingButton.hidden = !enabled;
       this.floatingButton.disabled = busy;
       this.floatingButton.dataset.state = this.state;

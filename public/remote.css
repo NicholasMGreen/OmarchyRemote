@@ -898,6 +898,10 @@
   -webkit-touch-callout: none;
   user-select: none;
 }
+.dictation-button[data-mode='voice'] {
+  color: var(--theme-accent);
+  border-color: currentColor;
+}
 .dictation-button[data-state='recording'] svg {
   background: currentColor;
   border-radius: 3px;

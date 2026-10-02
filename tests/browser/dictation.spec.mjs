@@ -368,7 +368,8 @@ for (const width of [402, 1194]) {
     await expect(small).toBeVisible();
     await app.getByRole('button', { name: 'Start dictation' }).click({ delay: 650 });
     await expect(floating).toBeVisible();
-    await expect(small).toBeHidden();
+    await expect(small).toBeVisible();
+    await expect(small).toHaveAccessibleName('Turn off Voice mode');
     await expect(floating).toHaveText('Talk');
     const before = await floating.boundingBox();
     expect(before.width).toBe(80);
@@ -406,8 +407,7 @@ for (const width of [402, 1194]) {
     await floating.click();
     await expect(floating).toHaveText('Send');
     await expect(app.getByRole('button', { name: 'Stop speaking' })).toBeHidden();
-    await page.keyboard.press('Escape');
-    await app.getByRole('button', { name: 'Start dictation' }).click({ delay: 650 });
+    await app.getByRole('button', { name: 'Turn off Voice mode' }).click();
     await expect(floating).toBeHidden();
     await expect(small).toBeVisible();
   });
@@ -465,3 +465,46 @@ test('holding toggles Voice without recording; dragging cancels and keyboard is 
   await expect(floating).toBeHidden();
   expect(state.sent).toEqual([]);
 });
+
+for (const width of [402, 1194]) {
+  test(`voice off button cancels pending transcription and restores microphone at ${width}px`, async ({
+    page,
+  }) => {
+    const { app, state } = await voiceSetup(page, width);
+    const small = app.locator('.dictation-button');
+    const before = await small.boundingBox();
+    await small.click({ delay: 650 });
+    await expect(small).toHaveAccessibleName('Turn off Voice mode');
+    await expect(small).toHaveAttribute('data-mode', 'voice');
+    expect(await small.boundingBox()).toEqual(before);
+    await app.getByRole('button', { name: 'Read', exact: true }).click();
+    await expect(app.getByRole('button', { name: 'Stop speaking' })).toBeVisible();
+    await small.click();
+    await expect(app.getByRole('button', { name: 'Stop speaking' })).toBeHidden();
+    await expect(small).toHaveAccessibleName('Start dictation');
+    await small.click({ delay: 650 });
+    const floating = app.locator('.herdr-voice-microphone');
+    await floating.click();
+    await expect(floating).toHaveText('Send');
+    let release;
+    let transcribing = false;
+    const pending = new Promise(resolve => {
+      release = resolve;
+    });
+    await page.route('**/api/dictation', async r => {
+      transcribing = true;
+      await pending;
+      await r.fulfill({ json: { text: 'Canceled voice request' } });
+    });
+    await floating.click();
+    await expect.poll(() => transcribing).toBe(true);
+    await expect(small).toBeEnabled();
+    await small.click();
+    await expect(floating).toBeHidden();
+    await expect(small).toHaveAccessibleName('Start dictation');
+    release();
+    await page.waitForTimeout(300);
+    expect(state.sent).toEqual([]);
+    await expect(app.locator('textarea.native-input')).toHaveValue('');
+  });
+}
