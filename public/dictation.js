@@ -115,7 +115,7 @@
         if (epoch !== this.epoch || pane !== this.dictation.getTarget()) return;
         this.pane = pane;
         this.session = value.session;
-        this.seen = value.answer?.id;
+        this.seen = new Set([value.answer?.id, ...(value.updates || []).map(update => update.id)]);
         this.enabled = true;
         this.dictation.syncMicrophone();
         this.status('Voice on · recordings send automatically', false);
@@ -138,9 +138,16 @@
             this.status('Conversation changed. Enable Voice again.');
             return;
           }
-          if (!value.working && value.answer?.id && value.answer.id !== this.seen) {
-            this.seen = value.answer.id;
-            await this.speak(this.pane, value.answer.id);
+          // Keep fetching while audio plays, but never interrupt it with the next update.
+          // The host retains this turn's prose so updates arriving during playback stay ordered.
+          if ((!this.audioURL || this.player.paused) && !this.needsPlay) {
+            const messages = [...(value.updates || [])];
+            if (!value.working && value.answer) messages.push(value.answer);
+            const next = messages.find(message => message.id && !this.seen.has(message.id));
+            if (next) {
+              this.seen.add(next.id);
+              await this.speak(this.pane, next.id);
+            }
           }
         }
       } catch (e) {

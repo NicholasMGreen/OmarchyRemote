@@ -1,4 +1,4 @@
-//! Read completed agent answers and synthesize them on the host. No terminal scraping.
+//! Read assistant progress and completed answers and synthesize them on the host. No terminal scraping.
 use crate::{ApiError, App, apps, dictation, error};
 use axum::{
     Json,
@@ -150,10 +150,12 @@ fn blocks(value: &Value) -> String {
 }
 fn parse(agent: &str, log: &str) -> Value {
     let mut answer = Value::Null;
+    let mut updates: Vec<Value> = Vec::new();
+    let mut turn = Value::Null;
     let mut active = false;
     let mut candidate = String::new();
     let mut candidate_id = String::new();
-    for line in log.lines() {
+    for (line_number, line) in log.lines().enumerate() {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
         };
@@ -165,15 +167,36 @@ fn parse(agent: &str, log: &str) -> Value {
             {
                 candidate = blocks(&p["content"]);
             }
+            if active
+                && !turn.is_null()
+                && v["type"] == "response_item"
+                && p["role"] == "assistant"
+                && p["phase"] == "commentary"
+            {
+                let text = blocks(&p["content"]);
+                if !text.trim().is_empty() {
+                    let key = format!("update:{turn}:{}", updates.len());
+                    updates.push(json!({"key":key,"text":text}));
+                }
+            }
             if v["type"] != "event_msg" {
                 continue;
             }
             match p["type"].as_str().unwrap_or_default() {
                 "task_started" => {
+                    turn = p
+                        .get("turn_id")
+                        .filter(|v| !v.is_null())
+                        .cloned()
+                        .or_else(|| v.get("timestamp").cloned())
+                        .unwrap_or(json!(line_number));
+                    updates.clear();
                     active = true;
                     candidate.clear();
                 }
                 "turn_aborted" => {
+                    updates.clear();
+                    turn = Value::Null;
                     active = false;
                     candidate.clear();
                 }
@@ -202,6 +225,14 @@ fn parse(agent: &str, log: &str) -> Value {
                 continue;
             }
             if v["type"] == "user" {
+                // Tool results are user-role records too; they continue the same turn.
+                let tool_result = m["content"]
+                    .as_array()
+                    .is_some_and(|blocks| blocks.iter().any(|b| b["type"] == "tool_result"));
+                if !tool_result {
+                    turn = v.get("uuid").cloned().unwrap_or(json!(line_number));
+                    updates.clear();
+                }
                 active = true;
                 candidate.clear();
                 candidate_id.clear();
@@ -210,6 +241,17 @@ fn parse(agent: &str, log: &str) -> Value {
                 continue;
             }
             active = true;
+            // These are persisted assistant text blocks, not streaming deltas or thinking.
+            if !turn.is_null() && m["stop_reason"] == "tool_use" {
+                let text = blocks(&m["content"]);
+                let key = format!(
+                    "update:{turn}:{}",
+                    v.get("uuid").cloned().unwrap_or(json!(line_number))
+                );
+                if !text.trim().is_empty() && !updates.iter().any(|u| u["key"] == key) {
+                    updates.push(json!({"key":key,"text":text}));
+                }
+            }
             if m["stop_reason"] != "end_turn" {
                 candidate.clear();
                 candidate_id.clear();
@@ -232,7 +274,7 @@ fn parse(agent: &str, log: &str) -> Value {
             active = false;
         }
     }
-    json!({"answer":answer,"working":active})
+    json!({"answer":answer,"updates":updates,"working":active})
 }
 fn read_answer(agent: &str, path: &FsPath) -> anyhow::Result<Value> {
     let meta = fs::metadata(path)?;
@@ -258,11 +300,12 @@ fn read_answer(agent: &str, path: &FsPath) -> anyhow::Result<Value> {
     let session = path.file_stem().unwrap_or_default().to_string_lossy();
     value["session"] = json!(session);
     if !value["answer"].is_null() {
-        let key = format!(
-            "{}:{}:{}",
-            session, value["answer"]["key"], value["answer"]["text"]
-        );
-        value["answer"]["id"] = json!(format!("{:x}", Sha256::digest(key.as_bytes())));
+        identify(&mut value["answer"], &session);
+    }
+    if let Some(updates) = value["updates"].as_array_mut() {
+        for update in updates {
+            identify(update, &session);
+        }
     }
     let mut cache = READS.lock().unwrap();
     if cache.len() >= 32 {
@@ -270,6 +313,15 @@ fn read_answer(agent: &str, path: &FsPath) -> anyhow::Result<Value> {
     }
     cache.insert(path.to_owned(), (meta.len(), modified, value.clone()));
     Ok(value)
+}
+fn identify(message: &mut Value, session: &str) {
+    let key = format!("{}:{}:{}", session, message["key"], message["text"]);
+    message["id"] = json!(format!("{:x}", Sha256::digest(key.as_bytes())));
+}
+fn speech_message<'a>(value: &'a Value, id: &str) -> Option<&'a Value> {
+    std::iter::once(&value["answer"])
+        .chain(value["updates"].as_array().into_iter().flatten())
+        .find(|message| message["id"].as_str() == Some(id))
 }
 async fn latest(app: &App, pane: &str) -> anyhow::Result<Value> {
     let snapshot = app.herdr.call("session.snapshot", json!({})).await?;
@@ -379,13 +431,12 @@ pub async fn audio(
     Json(request): Json<SpeechRequest>,
 ) -> Result<Response, ApiError> {
     let value = latest(&app, &pane).await.map_err(error)?;
-    let answer = &value["answer"];
-    if answer["id"].as_str() != Some(&request.response_id) {
+    let Some(answer) = speech_message(&value, &request.response_id) else {
         return Err((
             StatusCode::CONFLICT,
-            Json(json!({"error":"The response changed; replay the latest answer"})),
+            Json(json!({"error":"The response changed; read the latest answer"})),
         ));
-    }
+    };
     let mut args = adapter().map_err(error)?;
     let cache_key = format!("{}:{:?}", request.response_id, args);
     if let Some(data) = AUDIO.lock().unwrap().get(&cache_key).cloned() {
@@ -483,13 +534,14 @@ pub async fn send(
 mod tests {
     use super::*;
     #[test]
-    fn codex_only_speaks_completed_turns() {
+    fn codex_keeps_progress_separate_from_completed_answers() {
         let log = [
             json!({"type":"event_msg","payload":{"type":"task_started"}}),
             json!({"type":"response_item","payload":{"role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Working"}]}}),
             json!({"type":"response_item","payload":{"role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Complete answer"}]}}),
         ].iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
         assert!(parse("codex", &log)["answer"].is_null());
+        assert_eq!(parse("codex", &log)["updates"][0]["text"], "Working");
         let done = format!(
             "{log}\n{}",
             json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"1"}})
@@ -522,6 +574,70 @@ mod tests {
             "First paragraph\n\nSecond paragraph"
         );
         assert_eq!(parse("claude", &log)["working"], false);
+    }
+    fn log(rows: &[Value]) -> String {
+        rows.iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    #[test]
+    fn codex_progress_is_ordered_and_stops_at_turn_boundaries() {
+        let rows = vec![
+            json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"one"}}),
+            json!({"type":"response_item","payload":{"type":"function_call","arguments":"do not speak tools"}}),
+            json!({"type":"response_item","payload":{"role":"assistant","phase":"analysis","content":[{"type":"output_text","text":"private"}]}}),
+            json!({"type":"response_item","payload":{"role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"I will check."}]}}),
+            json!({"type":"event_msg","payload":{"type":"agent_message","message":"I will check."}}),
+            json!({"type":"response_item","payload":{"role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Found the problem."}]}}),
+            json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"one","last_agent_message":"Fixed."}}),
+        ];
+        let result = parse("codex", &log(&rows));
+        assert_eq!(result["updates"].as_array().unwrap().len(), 2);
+        assert_eq!(result["updates"][0]["text"], "I will check.");
+        assert_eq!(result["updates"][1]["text"], "Found the problem.");
+        assert_eq!(result["answer"]["text"], "Fixed.");
+        let mut next = rows;
+        next.push(json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"two"}}));
+        assert_eq!(parse("codex", &log(&next))["updates"], json!([]));
+        next.push(json!({"type":"response_item","payload":{"role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Next task."}]}}));
+        next.push(json!({"type":"event_msg","payload":{"type":"turn_aborted"}}));
+        assert_eq!(parse("codex", &log(&next))["updates"], json!([]));
+    }
+    #[test]
+    fn claude_progress_excludes_tools_reasoning_and_workers() {
+        let rows = vec![
+            json!({"type":"user","uuid":"turn-one","message":{"content":"Request"}}),
+            json!({"type":"assistant","uuid":"thinking","message":{"stop_reason":"tool_use","content":[{"type":"thinking","thinking":"private"}]}}),
+            json!({"type":"assistant","uuid":"first","message":{"stop_reason":"tool_use","content":[{"type":"text","text":"Checking."},{"type":"tool_use","input":{"secret":"tool"}}]}}),
+            json!({"type":"user","message":{"content":[{"type":"tool_result","content":"private result"}]}}),
+            json!({"type":"assistant","uuid":"worker","isSidechain":true,"message":{"stop_reason":"tool_use","content":[{"type":"text","text":"worker"}]}}),
+            json!({"type":"assistant","uuid":"second","message":{"stop_reason":"tool_use","content":[{"type":"text","text":"Testing the fix."}]}}),
+            json!({"type":"assistant","uuid":"incomplete","message":{"stop_reason":null,"content":[{"type":"text","text":"unfinished"}]}}),
+            json!({"type":"assistant","message":{"id":"final","stop_reason":"end_turn","content":[{"type":"text","text":"Done."}]}}),
+        ];
+        let result = parse("claude", &log(&rows));
+        assert_eq!(result["updates"].as_array().unwrap().len(), 2);
+        assert_eq!(result["updates"][0]["text"], "Checking.");
+        assert_eq!(result["updates"][1]["text"], "Testing the fix.");
+        assert_eq!(result["answer"]["text"], "Done.");
+        let mut next = rows;
+        next.push(json!({"type":"user","uuid":"turn-two","message":{"content":"Next"}}));
+        assert_eq!(parse("claude", &log(&next))["updates"], json!([]));
+    }
+    #[test]
+    fn speech_ids_accept_only_current_progress_or_completed_answer() {
+        let mut value = json!({"answer":{"key":"final","text":"Done"},"updates":[{"key":"update:one","text":"Checking"}]});
+        identify(&mut value["answer"], "session");
+        identify(&mut value["updates"][0], "session");
+        let id = value["updates"][0]["id"].as_str().unwrap().to_owned();
+        assert_eq!(speech_message(&value, &id).unwrap()["text"], "Checking");
+        assert!(speech_message(&value, "arbitrary text").is_none());
+        let mut other = value["updates"][0].clone();
+        identify(&mut other, "other-session");
+        assert_ne!(other["id"], id);
+        value["updates"] = json!([]);
+        assert!(speech_message(&value, &id).is_none());
     }
     #[test]
     fn spoken_prose_keeps_paragraphs_and_omits_code() {

@@ -607,3 +607,59 @@ test('Read reports actual play rejection instead of offering an autoplay retry',
   await expect(app.locator('.herdr-voice-status')).toBeVisible();
   await expect(app.getByRole('button', { name: 'Play answer', exact: true })).toHaveCount(0);
 });
+
+async function finishSpeech(page) {
+  await page.evaluate(() => {
+    const audio = window.voicePlayer;
+    audio.paused = true;
+    audio.ended = true;
+    audio.onended();
+  });
+}
+
+test('Voice queues initial and progress text before the final answer without interrupting playback', async ({
+  page,
+}) => {
+  const { app, state } = await voiceSetup(page);
+  await app.getByRole('button', { name: 'Start dictation' }).click({ delay: 650 });
+  await expect(app.getByRole('button', { name: 'Turn off Voice mode' })).toBeVisible();
+  state.response.working = true;
+  state.response.updates = [{ id: 'initial', text: 'I will check.' }];
+  await expect.poll(() => state.generated, { timeout: 6000 }).toEqual([{ response_id: 'initial' }]);
+  state.response.updates.push({ id: 'progress', text: 'I found the issue.' });
+  state.response.answer = { id: 'final', text: 'Fixed and tested.' };
+  state.response.working = false;
+  await page.waitForTimeout(3200);
+  expect(state.generated).toEqual([{ response_id: 'initial' }]);
+  await finishSpeech(page);
+  await expect.poll(() => state.generated.length, { timeout: 6000 }).toBe(2);
+  expect(state.generated[1]).toEqual({ response_id: 'progress' });
+  await finishSpeech(page);
+  await expect.poll(() => state.generated.length, { timeout: 6000 }).toBe(3);
+  expect(state.generated[2]).toEqual({ response_id: 'final' });
+  await finishSpeech(page);
+  await page.waitForTimeout(3200);
+  expect(state.generated).toHaveLength(3);
+});
+
+test('Voice skips existing progress on enable, speaks new progress while working, and drops it on thread change', async ({
+  page,
+}) => {
+  const { app, state } = await voiceSetup(page);
+  state.response.working = true;
+  state.response.updates = [{ id: 'history', text: 'Already visible before enabling Voice.' }];
+  await app.getByRole('button', { name: 'Start dictation' }).click({ delay: 650 });
+  await expect(app.getByRole('button', { name: 'Turn off Voice mode' })).toBeVisible();
+  state.response.updates.push({ id: 'new-progress', text: 'New progress.' });
+  await expect
+    .poll(() => state.generated, { timeout: 6000 })
+    .toEqual([{ response_id: 'new-progress' }]);
+  state.response.updates.push({ id: 'pending-progress', text: 'Still more progress.' });
+  await app
+    .locator('.herdr-pane-tabs')
+    .getByRole('button', { name: 'Second', exact: true })
+    .click();
+  await expect(app.locator('.herdr-voice-microphone')).toBeHidden();
+  await page.waitForTimeout(3200);
+  expect(state.generated).toHaveLength(1);
+});

@@ -63,24 +63,24 @@ to the host and does not replace Apple's keyboard microphone globally.
 ## Voice conversations
 
 Hold the microphone for 550 ms to enable **Voice mode** while still pressing (release does not trigger another action), then tap the headphones button in the bottom bar to turn it off and stop recording or playback. Keyboard users can focus the microphone and press **Shift+Enter**. Voice mode enables a conversation loop using the same microphone:
-record, press again to transcribe, send, wait for the completed answer, and listen.
-The host generates one WAV for the whole response. **Read** works without
+record, press again to transcribe, send, and listen to the assistant’s initial reply, progress updates, and completed answer.
+The host generates one WAV per whole text message; playback stays in order and never interrupts the previous message. **Read** works without
 Voice mode; **Stop** stops playback or suppresses an in-flight generation. Starting
 a recording also stops playback. If the device blocks automatic audio, **Play
 answer** starts the ready recording explicitly.
 
-Voice mode starts from the current answer and speaks new completed answers only.
+Voice mode starts from the current conversation position and speaks new assistant text only. It skips existing messages when enabled, reads progress while the agent works, and reads the final answer when the turn completes. Read still replays the latest completed answer. Pending progress belongs to the current turn and is discarded when a new turn or thread replaces it.
 Switching threads or changing the underlying agent session turns it off. Existing
 drafts, edits during transcription, and busy agents leave the transcript in the
 composer for manual sending. A failed or uncertain send keeps the draft and is
 never automatically retried. Voice mode is opt-in for the current view, not a saved
 preference. Normal dictation still never sends automatically.
 
-Completed answers come from local Codex and Claude conversation logs, not terminal
+Progress and completed answers come from local Codex and Claude conversation logs, not terminal
 screens. Session identity comes from Herdr when available, otherwise the foreground
 Codex process's unique CLI rollout or Claude's PID/session record. Ambiguous or
 unsupported sessions report an error rather than reading another thread. Worker
-responses, tools, and reasoning are excluded. Code fences are announced as omitted;
+responses, tool calls/results, and reasoning are excluded. Codex commentary messages and Claude’s persisted assistant text blocks are eligible progress; partial streaming text is excluded. Code fences are announced as omitted;
 Markdown links are spoken as their labels. Log formats are agent-version dependent.
 
 The default speech provider is [Piper](https://github.com/OHF-Voice/piper1-gpl):
