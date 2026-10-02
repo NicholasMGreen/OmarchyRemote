@@ -151,6 +151,21 @@ local and produces 24 kHz PCM WAV audio. Each uncached request loads the model
 in its own process, so there is no persistent model service or idle memory use.
 The backend's existing audio cache avoids regenerating identical readbacks.
 
+To blend two voices, add `--blend-voice` and optionally `--blend-ratio` to the
+adapter arguments. For example, a 50/50 British male Fable/George blend uses:
+
+```text
+--voice bm_fable --blend-voice bm_george --blend-ratio 0.5 --language en-gb --speed 1.0
+```
+
+In `OMARCHY_SPEECH_COMMAND`, put each flag and value in its own JSON array entry.
+The ratio is the weight of the first voice: `1.0` is pure Fable, `0.0` is pure
+George. The default blend ratio is `0.5`. The adapter interpolates the installed
+voice style arrays before synthesis; it does not mix two audio recordings or
+download new voices. Remove `--blend-voice` to return to the single selected
+voice. Restart the backend after changing its command to apply the setting and
+clear previously generated audio.
+
 ### Local Qwen3-TTS speech
 
 `scripts/qwen-speech.py` supports Qwen3-TTS CustomVoice models through the same
