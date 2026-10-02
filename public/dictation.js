@@ -72,6 +72,7 @@
       this.status(this.enabled ? 'Ready to talk' : '', false);
     }
     reset() {
+      this.dictation.cancelHolds?.forEach(cancel => cancel());
       ++this.epoch;
       this.enabled = false;
       this.loading = false;
@@ -314,6 +315,7 @@
       this.floatingCaption = node('span', 'herdr-voice-microphone-caption');
       this.floatingButton.append(this.floatingIcon, this.floatingCaption);
       this.floatingButton.hidden = true;
+      this.cancelHolds = [];
       this.bindMicrophone(this.button);
       this.bindMicrophone(this.floatingButton);
       overlayRoot.append(this.floatingButton);
@@ -326,6 +328,7 @@
       this.notice.append(this.label, this.retryButton, this.dismissButton);
       overlayRoot.append(this.notice);
       this.background = () => {
+        if (document.hidden) this.cancelHolds.forEach(cancel => cancel());
         if (document.hidden && ['starting', 'recording'].includes(this.state)) this.cancel();
       };
       document.addEventListener('visibilitychange', this.background);
@@ -335,7 +338,14 @@
     }
     bindMicrophone(control) {
       let press = null;
+      let holdTimer;
       let suppressClick = false;
+      const cancelHold = () => {
+        clearTimeout(holdTimer);
+        if (press) suppressClick = true;
+        press = null;
+      };
+      this.cancelHolds.push(cancelHold);
       control.style.touchAction = 'none';
       control.setAttribute(
         'aria-description',
@@ -346,27 +356,30 @@
         e.preventDefault();
         e.stopPropagation();
         suppressClick = false;
-        press = { x: e.clientX, y: e.clientY, time: performance.now() };
+        clearTimeout(holdTimer);
+        press = { x: e.clientX, y: e.clientY };
+        const pane = this.getTarget();
+        // Prime playback in the touch gesture; the hold callback runs later.
+        if (!this.voice.enabled && this.state === 'idle') this.voice.unlock();
         control.setPointerCapture(e.pointerId);
+        holdTimer = setTimeout(() => {
+          const shouldToggle =
+            press && control.isConnected && !document.hidden && pane === this.getTarget();
+          cancelHold();
+          if (shouldToggle) this.toggleVoice();
+        }, 550);
       };
       control.onpointermove = e => {
         if (press && Math.hypot(e.clientX - press.x, e.clientY - press.y) > 10) {
-          press = null;
-          suppressClick = true;
+          cancelHold();
         }
       };
       control.onpointerup = e => {
-        if (press && performance.now() - press.time >= 550) {
-          suppressClick = true;
-          this.toggleVoice();
-        }
+        clearTimeout(holdTimer);
         press = null;
         if (control.hasPointerCapture(e.pointerId)) control.releasePointerCapture(e.pointerId);
       };
-      control.onpointercancel = control.onlostpointercapture = () => {
-        if (press) suppressClick = true;
-        press = null;
-      };
+      control.onpointercancel = control.onlostpointercapture = cancelHold;
       control.onclick = e => {
         e.stopPropagation();
         if (suppressClick && e.detail !== 0) {
@@ -558,6 +571,7 @@
       }
     }
     cancel() {
+      this.cancelHolds.forEach(cancel => cancel());
       ++this.generation;
       this.abort?.abort();
       if (this.recorder?.state === 'recording') this.recorder.stop();

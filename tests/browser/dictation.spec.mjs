@@ -508,3 +508,32 @@ for (const width of [402, 1194]) {
     await expect(app.locator('textarea.native-input')).toHaveValue('');
   });
 }
+
+for (const width of [402, 1194]) {
+  test(`holding activates Voice before release without triggering a click at ${width}px`, async ({
+    page,
+  }) => {
+    const { app, state } = await voiceSetup(page, width);
+    const small = app.locator('.dictation-button');
+    const floating = app.locator('.herdr-voice-microphone');
+    const box = await small.boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await expect(floating).toBeVisible();
+    await expect(small).toHaveAccessibleName('Turn off Voice mode');
+    await expect(floating).toHaveText('Talk');
+    await page.mouse.up();
+    await expect(floating).toBeVisible();
+    await expect(floating).toHaveText('Talk');
+    expect(state.sent).toEqual([]);
+    await small.click();
+    await expect(floating).toBeHidden();
+    // A canceled pointer must not activate Voice later.
+    await page.mouse.down();
+    await small.dispatchEvent('pointercancel', { pointerId: 1 });
+    await page.waitForTimeout(650);
+    await page.mouse.up();
+    await expect(floating).toBeHidden();
+    await expect(small).toHaveAccessibleName('Start dictation');
+  });
+}
