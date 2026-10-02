@@ -227,7 +227,7 @@ test('voice preserves an existing draft instead of automatically sending it', as
   await expect(app.locator('.herdr-voice-status')).toContainText('Saved as a draft');
   expect(state.sent).toEqual([]);
 });
-test('changing thread during voice transcription keeps a draft and disables voice', async ({
+test('changing thread cancels pending voice transcription and keeps Voice mode enabled', async ({
   page,
 }) => {
   const { app, state } = await voiceSetup(page);
@@ -249,10 +249,12 @@ test('changing thread during voice transcription keeps a draft and disables voic
     .getByRole('button', { name: 'Second', exact: true })
     .click();
   release();
-  await expect
-    .poll(() => page.evaluate(() => localStorage.getItem('omarchy-herdr-drafts-v1')))
-    .toContain('Keep in original thread');
-  await expect(app.locator('.herdr-voice-microphone')).toBeHidden();
+  await page.waitForTimeout(300);
+  expect(
+    await page.evaluate(() => localStorage.getItem('omarchy-herdr-drafts-v1') || '')
+  ).not.toContain('Keep in original thread');
+  await expect(app.locator('.herdr-voice-microphone')).toBeVisible();
+  await expect(app.getByRole('button', { name: 'Turn off Voice mode' })).toBeVisible();
   expect(state.sent).toEqual([]);
 });
 test('voice send failure retains the draft without retrying', async ({ page }) => {
@@ -659,7 +661,108 @@ test('Voice skips existing progress on enable, speaks new progress while working
     .locator('.herdr-pane-tabs')
     .getByRole('button', { name: 'Second', exact: true })
     .click();
-  await expect(app.locator('.herdr-voice-microphone')).toBeHidden();
+  await expect(app.locator('.herdr-voice-microphone')).toBeVisible();
+  await expect(app.locator('.herdr-voice-microphone')).toHaveText('Talk');
   await page.waitForTimeout(3200);
   expect(state.generated).toHaveLength(1);
+});
+
+test('Voice stays enabled but silent after switching; Read is explicit and Talk sends to busy agents', async ({
+  page,
+}) => {
+  const { app, state } = await voiceSetup(page);
+  const responses = {
+    a: { ...state.response, session: 'session-a' },
+    b: {
+      ...state.response,
+      session: 'session-b',
+      answer: { id: 'b-history', text: 'Old B answer' },
+    },
+  };
+  await page.route('**/api/herdr/panes/*/response', r =>
+    r.fulfill({ json: responses[r.request().url().split('/').at(-2)] })
+  );
+  const floating = app.locator('.herdr-voice-microphone');
+  await app.getByRole('button', { name: 'Start dictation' }).click({ delay: 650 });
+  await expect(floating).toHaveText('Talk');
+  await app.getByRole('button', { name: 'Read', exact: true }).click();
+  await expect(app.getByRole('button', { name: 'Stop speaking' })).toBeVisible();
+  await app
+    .locator('.herdr-pane-tabs')
+    .getByRole('button', { name: 'Second', exact: true })
+    .click();
+  await expect(floating).toHaveText('Talk');
+  await expect(app.getByRole('button', { name: 'Stop speaking' })).toBeHidden();
+  expect(await page.evaluate(() => window.voicePlayer.paused)).toBe(true);
+  responses.b.updates = [{ id: 'b-in-progress', text: 'B was already working' }];
+  responses.b.working = true;
+  responses.b.can_send = false;
+  await page.waitForTimeout(3200);
+  expect(state.generated).toEqual([{ response_id: 'old' }]);
+  await app.getByRole('button', { name: 'Read', exact: true }).click();
+  await expect.poll(() => state.generated.length).toBe(2);
+  expect(state.generated[1]).toEqual({ response_id: 'b-history' });
+  await floating.click();
+  await expect(floating).toHaveText('Send');
+  await floating.click();
+  await expect.poll(() => state.sent.length).toBe(1);
+  expect(state.sent[0].url).toContain('/b/voice-input');
+  expect(state.sent[0].data).toEqual({ text: 'dictated words', session: 'session-b' });
+  await expect(app.locator('textarea.native-input')).toHaveValue('');
+  await expect(app.locator('.herdr-voice-status')).toBeHidden();
+  responses.b.updates.push({ id: 'b-new', text: 'New response' });
+  await expect.poll(() => state.generated.length, { timeout: 6000 }).toBe(3);
+  expect(state.generated[2]).toEqual({ response_id: 'b-new' });
+});
+
+test('Voice remains enabled through the pane list and unsupported threads, then recovers on a supported thread', async ({
+  page,
+}) => {
+  const { app } = await voiceSetup(page);
+  await app.getByRole('button', { name: 'Start dictation' }).click({ delay: 650 });
+  const floating = app.locator('.herdr-voice-microphone');
+  await expect(floating).toHaveText('Talk');
+  await page.route('**/api/herdr/panes/b/response', r =>
+    r.fulfill({ status: 400, json: { error: 'No supported agent in this pane' } })
+  );
+  await app
+    .locator('.herdr-pane-tabs')
+    .getByRole('button', { name: 'Second', exact: true })
+    .click();
+  await expect(app.getByRole('button', { name: 'Turn off Voice mode' })).toBeVisible();
+  await expect(floating).toBeDisabled();
+  await expect(app.locator('.herdr-voice-status')).toContainText('No supported agent');
+  await app.locator('.herdr-pane-tabs').getByRole('button', { name: 'First', exact: true }).click();
+  await expect(floating).toHaveText('Talk');
+  await expect(floating).toBeEnabled();
+  // Going through the project/pane list should preserve the same app-level mode.
+  await app.locator('.herdr-detail-bar').getByRole('button', { name: 'All panes' }).click();
+  await app.locator('.herdr-pane').filter({ hasText: 'First' }).click();
+  await expect(floating).toHaveText('Talk');
+  await expect(app.getByRole('button', { name: 'Turn off Voice mode' })).toBeVisible();
+});
+
+test('switching threads during a recording discards audio without transcription or send', async ({
+  page,
+}) => {
+  const { app, state } = await voiceSetup(page);
+  let uploads = 0;
+  page.on('request', request => {
+    if (request.url().endsWith('/api/dictation') && request.method() === 'POST') uploads++;
+  });
+  await app.getByRole('button', { name: 'Start dictation' }).click({ delay: 650 });
+  const floating = app.locator('.herdr-voice-microphone');
+  await floating.click();
+  await expect(floating).toHaveText('Send');
+  await app
+    .locator('.herdr-pane-tabs')
+    .getByRole('button', { name: 'Second', exact: true })
+    .click();
+  await expect(floating).toHaveText('Talk');
+  await expect(app.getByRole('button', { name: 'Turn off Voice mode' })).toBeVisible();
+  expect(await page.evaluate(() => window.stoppedTracks)).toBeGreaterThan(0);
+  await page.waitForTimeout(300);
+  expect(uploads).toBe(0);
+  expect(state.sent).toEqual([]);
+  await expect(app.locator('textarea.native-input')).toHaveValue('');
 });

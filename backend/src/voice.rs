@@ -342,10 +342,8 @@ async fn latest(app: &App, pane: &str) -> anyhow::Result<Value> {
     tokio::task::spawn_blocking(move || {
         let path = resolve(&name, &info["process_info"], &agent)?;
         let mut value = read_answer(&name, &path)?;
-        value["can_send"] = json!(matches!(
-            agent["agent_status"].as_str(),
-            Some("idle" | "done")
-        ));
+        // Supported agents accept input while working, just like the normal Send button.
+        value["can_send"] = json!(true);
         // A live working state suppresses premature playback even if a transcript block looks final.
         if agent["agent_status"] == "working" {
             value["working"] = json!(true);
@@ -513,13 +511,10 @@ pub async fn send(
         ));
     }
     let latest = latest(&app, &pane).await.map_err(error)?;
-    if latest["session"] != input.session
-        || latest["working"] != false
-        || latest["can_send"] != true
-    {
+    if latest["session"] != input.session {
         return Err((
             StatusCode::CONFLICT,
-            Json(json!({"error":"Agent is busy or conversation changed; draft kept"})),
+            Json(json!({"error":"Conversation changed; draft kept"})),
         ));
     }
     Ok(Json(

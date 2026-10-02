@@ -1299,7 +1299,7 @@
       this.syncPanels();
     }
     select(id) {
-      if (id !== this.selected) this.dictation?.voice.reset();
+      const changed = id !== this.selected;
       this.recentPanes = [
         ...new Set([id, this.selected, ...this.recentPanes].filter(Boolean)),
       ].slice(0, 40);
@@ -1308,6 +1308,7 @@
       this.nativeInput.select(id);
       this.nativeInput.submit.disabled = !!this.uploading && this.uploadPane === id;
       this.selected = id;
+      if (changed) this.dictation?.voice.changeThread();
       storage.set('omarchy-herdr-pane', id);
       for (const row of this.list.querySelectorAll('.herdr-pane'))
         row.setAttribute('aria-current', String(row.dataset.pane === id));

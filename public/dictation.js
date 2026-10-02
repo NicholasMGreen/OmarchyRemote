@@ -77,10 +77,14 @@
       this.player.removeAttribute('src');
       this.status(this.enabled ? 'Ready to talk' : '', false);
     }
-    reset() {
+    reset(keepMode = false) {
       this.dictation.cancelHolds?.forEach(cancel => cancel());
       ++this.epoch;
-      this.enabled = false;
+      this.enabled = keepMode;
+      this.ready = false;
+      this.autoRead = false;
+      this.pane = null;
+      this.session = null;
       this.loading = false;
       this.speaking = false;
       clearTimeout(this.timer);
@@ -102,11 +106,24 @@
     async toggle() {
       if (this.enabled || this.loading) return this.reset();
       this.reset();
+      this.autoRead = true;
       this.unlock();
+      await this.followThread();
+    }
+    changeThread() {
+      const keepMode = this.enabled || this.loading;
+      this.reset(keepMode);
+      if (!keepMode) return;
+      // Switching drops capture/transcription rather than delivering audio to either thread.
+      this.dictation.cancel();
+      if (this.dictation.getTarget()) this.followThread();
+    }
+    async followThread() {
       const epoch = this.epoch;
       const pane = this.dictation.getTarget();
       if (!pane) return;
       this.loading = true;
+      this.dictation.syncMicrophone();
       this.status('Checking voice…', false);
       try {
         const provider = await (await this.request('/api/voice')).json();
@@ -117,13 +134,17 @@
         this.session = value.session;
         this.seen = new Set([value.answer?.id, ...(value.updates || []).map(update => update.id)]);
         this.enabled = true;
+        this.ready = true;
         this.dictation.syncMicrophone();
         this.status('Voice on · recordings send automatically', false);
         this.poll();
       } catch (e) {
         if (epoch === this.epoch) this.status(e.message);
       } finally {
-        if (epoch === this.epoch) this.loading = false;
+        if (epoch === this.epoch) {
+          this.loading = false;
+          this.dictation.syncMicrophone();
+        }
       }
     }
     async poll() {
@@ -134,13 +155,12 @@
           const value = await this.latest(this.pane);
           if (epoch !== this.epoch || this.dictation.state !== 'idle' || document.hidden) return;
           if (value.session !== this.session) {
-            this.reset();
-            this.status('Conversation changed. Enable Voice again.');
+            this.changeThread();
             return;
           }
           // Keep fetching while audio plays, but never interrupt it with the next update.
           // The host retains this turn's prose so updates arriving during playback stay ordered.
-          if ((!this.audioURL || this.player.paused) && !this.needsPlay) {
+          if (this.autoRead && (!this.audioURL || this.player.paused) && !this.needsPlay) {
             const messages = [...(value.updates || [])];
             if (!value.working && value.answer) messages.push(value.answer);
             const next = messages.find(message => message.id && !this.seen.has(message.id));
@@ -159,7 +179,7 @@
     recordingStarted() {
       this.stopPlayback();
       this.dictation.input.saveDraft();
-      return this.enabled
+      return this.enabled && this.ready
         ? { epoch: this.epoch, pane: this.pane, draft: this.dictation.input.draft }
         : null;
     }
@@ -189,15 +209,15 @@
           context.pane !== this.dictation.getTarget()
         )
           return;
-        if (
-          latest.session !== this.session ||
-          latest.can_send !== true ||
-          latest.working ||
-          input.draft !== text
-        ) {
-          this.status('Saved as a draft; the agent is busy or the conversation changed.');
+        if (latest.session !== this.session || input.draft !== text) {
+          this.status('Saved as a draft; the conversation or composer changed.');
           return;
         }
+        // Skip updates from work already underway; follow responses to this voice message.
+        this.seen = new Set([
+          latest.answer?.id,
+          ...(latest.updates || []).map(update => update.id),
+        ]);
         // Explicit REST acknowledgement; never retry a send after a lost connection.
         await this.request(this.path(context.pane, 'voice-input'), {
           method: 'POST',
@@ -209,7 +229,10 @@
           input.storeDraft(context.pane, '');
           input.dismiss();
         }
-        if (context.epoch === this.epoch) this.status('Sent · waiting for the answer', false);
+        if (context.epoch === this.epoch) {
+          this.autoRead = true;
+          this.status('Sent · waiting for the answer', false);
+        }
       } catch (e) {
         if (context.epoch === this.epoch)
           this.status('Could not confirm sending. Draft kept; check the thread before retrying.');
@@ -463,7 +486,7 @@
       this.button.disabled = busy && !enabled;
       this.button.setAttribute('aria-busy', String(busy && !enabled));
       this.floatingButton.hidden = !enabled;
-      this.floatingButton.disabled = busy;
+      this.floatingButton.disabled = busy || !this.voice?.ready;
       this.floatingButton.dataset.state = this.state;
       this.floatingButton.setAttribute(
         'aria-label',
@@ -474,9 +497,16 @@
       this.floatingButton.title = recording
         ? 'Tap to finish recording and send'
         : 'Tap to talk · hold to leave Voice mode';
-      this.floatingCaption.textContent = recording ? 'Send' : busy ? 'Wait…' : 'Talk';
+      this.floatingCaption.textContent = recording
+        ? 'Send'
+        : busy || this.voice?.loading
+          ? 'Wait…'
+          : !this.voice?.ready
+            ? 'Unavailable'
+            : 'Talk';
     }
     async toggle() {
+      if (this.voice.enabled && !this.voice.ready) return;
       if (this.state === 'recording') {
         this.stop();
         return;
