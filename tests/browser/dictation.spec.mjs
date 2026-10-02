@@ -207,7 +207,7 @@ test('voice sends dictation once and reads only a new completed answer', async (
   expect(state.generated).toEqual([]);
   state.response.working = false;
   await expect.poll(() => state.generated.length, { timeout: 6000 }).toBe(1);
-  expect(state.generated[0]).toEqual({ response_id: 'next' });
+  expect(state.generated[0]).toMatchObject({ response_id: 'next', response_ids: ['next'] });
   await expect(app.locator('.herdr-voice-status')).toContainText('Speaking');
   await page.waitForTimeout(3200);
   expect(state.generated).toHaveLength(1);
@@ -636,18 +636,20 @@ test('Voice queues initial and progress text before the final answer without int
   await expect(app.getByRole('button', { name: 'Turn off Voice mode' })).toBeVisible();
   state.response.working = true;
   state.response.updates = [{ id: 'initial', text: 'I will check.' }];
-  await expect.poll(() => state.generated, { timeout: 6000 }).toEqual([{ response_id: 'initial' }]);
+  await expect
+    .poll(() => state.generated, { timeout: 6000 })
+    .toMatchObject([{ response_id: 'initial' }]);
   state.response.updates.push({ id: 'progress', text: 'I found the issue.' });
   state.response.answer = { id: 'final', text: 'Fixed and tested.' };
   state.response.working = false;
   await page.waitForTimeout(3200);
-  expect(state.generated).toEqual([{ response_id: 'initial' }]);
+  expect(state.generated).toMatchObject([{ response_id: 'initial' }]);
   await finishSpeech(page);
   await expect.poll(() => state.generated.length, { timeout: 6000 }).toBe(2);
-  expect(state.generated[1]).toEqual({ response_id: 'progress' });
+  expect(state.generated[1]).toMatchObject({ response_id: 'progress' });
   await finishSpeech(page);
   await expect.poll(() => state.generated.length, { timeout: 6000 }).toBe(3);
-  expect(state.generated[2]).toEqual({ response_id: 'final' });
+  expect(state.generated[2]).toMatchObject({ response_id: 'final' });
   await finishSpeech(page);
   await page.waitForTimeout(3200);
   expect(state.generated).toHaveLength(3);
@@ -664,7 +666,7 @@ test('Voice skips existing progress on enable, speaks new progress while working
   state.response.updates.push({ id: 'new-progress', text: 'New progress.' });
   await expect
     .poll(() => state.generated, { timeout: 6000 })
-    .toEqual([{ response_id: 'new-progress' }]);
+    .toMatchObject([{ response_id: 'new-progress' }]);
   state.response.updates.push({ id: 'pending-progress', text: 'Still more progress.' });
   await app
     .locator('.herdr-pane-tabs')
@@ -707,10 +709,10 @@ test('Voice stays enabled but silent after switching; Read is explicit and Talk 
   responses.b.working = true;
   responses.b.can_send = false;
   await page.waitForTimeout(3200);
-  expect(state.generated).toEqual([{ response_id: 'old' }]);
+  expect(state.generated).toMatchObject([{ response_id: 'old' }]);
   await app.getByRole('button', { name: 'Read', exact: true }).click();
   await expect.poll(() => state.generated.length).toBe(2);
-  expect(state.generated[1]).toEqual({ response_id: 'b-history' });
+  expect(state.generated[1]).toMatchObject({ response_id: 'b-history' });
   await floating.click();
   await expect(floating).toHaveText('Send');
   await floating.click();
@@ -721,7 +723,7 @@ test('Voice stays enabled but silent after switching; Read is explicit and Talk 
   await expect(app.locator('.herdr-voice-status')).toBeHidden();
   responses.b.updates.push({ id: 'b-new', text: 'New response' });
   await expect.poll(() => state.generated.length, { timeout: 6000 }).toBe(3);
-  expect(state.generated[2]).toEqual({ response_id: 'b-new' });
+  expect(state.generated[2]).toMatchObject({ response_id: 'b-new' });
 });
 
 test('Voice remains enabled through the pane list and unsupported threads, then recovers on a supported thread', async ({
@@ -774,4 +776,216 @@ test('switching threads during a recording discards audio without transcription 
   expect(uploads).toBe(0);
   expect(state.sent).toEqual([]);
   await expect(app.locator('textarea.native-input')).toHaveValue('');
+});
+
+async function streamingFixture(page, realAudio = false) {
+  await page.evaluate(real => {
+    window.streamSources = [];
+    window.streamRequests = [];
+    window.streamCanceled = 0;
+    if (!real) {
+      window.AudioContext = class {
+        constructor() {
+          this.state = 'running';
+          this.currentTime = 0;
+          window.streamContext = this;
+        }
+        addEventListener(name, callback) {
+          this.stateChanged = callback;
+        }
+        removeEventListener() {
+          this.stateChanged = null;
+        }
+        resume() {
+          return Promise.resolve();
+        }
+        close() {
+          return Promise.resolve();
+        }
+        createBuffer(channels, length, rate) {
+          return { duration: length / rate, getChannelData: () => new Float32Array(length) };
+        }
+        createBufferSource() {
+          const source = {
+            connect() {},
+            disconnect() {},
+            start(at) {
+              this.at = at;
+              window.streamSources.push(this);
+            },
+            stop() {
+              this.stopped = true;
+            },
+          };
+          return source;
+        }
+      };
+    }
+    const original = window.fetch;
+    window.fetch = async (url, options) => {
+      if (!String(url).endsWith('/speech')) return original(url, options);
+      window.streamRequests.push(JSON.parse(options.body));
+      options.signal.addEventListener('abort', () => (window.streamRequestAborted = true));
+      if (window.suspendBeforeSpeech) window.streamContext.state = 'suspended';
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            window.streamController = controller;
+          },
+          cancel() {
+            window.streamCanceled++;
+          },
+        }),
+        { headers: { 'Content-Type': 'application/vnd.omarchy.pcm-stream' } }
+      );
+    };
+    window.emitSpeech = (finish = false) => {
+      // Split the header and samples across arbitrary network boundaries.
+      const bytes = new Uint8Array(4804);
+      new DataView(bytes.buffer).setUint32(0, 4800, true);
+      new DataView(bytes.buffer).setInt16(4, 1234, true);
+      window.streamController.enqueue(bytes.slice(0, 3));
+      window.streamController.enqueue(bytes.slice(3, 103));
+      window.streamController.enqueue(bytes.slice(103));
+      if (finish) {
+        window.streamController.enqueue(new Uint8Array(4));
+        window.streamController.close();
+      }
+    };
+    window.drainSpeech = () => {
+      for (const source of window.streamSources) source.onended?.();
+    };
+  }, realAudio);
+}
+
+test('PCM plays before EOF, schedules contiguous audio, and waits for playback to finish', async ({
+  page,
+}) => {
+  const { app } = await voiceSetup(page);
+  await streamingFixture(page);
+  await app.getByRole('button', { name: 'Read', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.streamRequests.length)).toBe(1);
+  expect(await page.evaluate(() => window.streamRequests[0].stream)).toBe(true);
+  await page.evaluate(() => window.emitSpeech());
+  await expect.poll(() => page.evaluate(() => window.streamSources.length)).toBe(1);
+  await expect(app.locator('.herdr-voice-status')).toContainText('Speaking');
+  await page.evaluate(() => window.emitSpeech(true));
+  await expect.poll(() => page.evaluate(() => window.streamSources.length)).toBe(2);
+  const times = await page.evaluate(() => window.streamSources.map(s => [s.at, s.buffer.duration]));
+  expect(times[1][0]).toBeCloseTo(times[0][0] + times[0][1], 5);
+  await expect(app.getByRole('button', { name: 'Stop speaking' })).toBeVisible();
+  await page.evaluate(() => window.drainSpeech());
+  await expect(app.getByRole('button', { name: 'Stop speaking' })).toBeHidden();
+});
+
+for (const action of ['stop', 'thread', 'record']) {
+  test(`${action} cancels streaming and discards buffered audio`, async ({ page }) => {
+    const { app } = await voiceSetup(page);
+    await streamingFixture(page);
+    await app.getByRole('button', { name: 'Read', exact: true }).click();
+    await expect.poll(() => page.evaluate(() => window.streamRequests.length)).toBe(1);
+    await page.evaluate(() => window.emitSpeech());
+    await expect.poll(() => page.evaluate(() => window.streamSources.length)).toBe(1);
+    if (action === 'stop') await app.getByRole('button', { name: 'Stop speaking' }).click();
+    if (action === 'thread')
+      await app
+        .locator('.herdr-pane-tabs')
+        .getByRole('button', { name: 'Second', exact: true })
+        .click();
+    if (action === 'record') await app.getByRole('button', { name: 'Start dictation' }).click();
+    await expect.poll(() => page.evaluate(() => window.streamCanceled)).toBe(1);
+    expect(await page.evaluate(() => window.streamSources.every(source => source.stopped))).toBe(
+      true
+    );
+    await expect(app.locator('.herdr-voice-status')).toBeHidden();
+  });
+}
+
+test('truncated PCM cancels scheduled audio and offers Read to retry', async ({ page }) => {
+  const { app } = await voiceSetup(page);
+  await streamingFixture(page);
+  await app.getByRole('button', { name: 'Read', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.streamRequests.length)).toBe(1);
+  await page.evaluate(() => {
+    window.emitSpeech();
+    window.streamController.close();
+  });
+  await expect(app.locator('.herdr-voice-status')).toContainText(
+    'Speech stream ended unexpectedly'
+  );
+  expect(await page.evaluate(() => window.streamSources.every(source => source.stopped))).toBe(
+    true
+  );
+});
+
+test('streamed PCM runs through the real Web Audio clock', async ({ page }) => {
+  const { app } = await voiceSetup(page);
+  await streamingFixture(page, true);
+  await app.getByRole('button', { name: 'Read', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.streamRequests.length)).toBe(1);
+  expect(await page.evaluate(() => window.streamRequests[0].stream)).toBe(true);
+  await page.evaluate(() => window.emitSpeech(true));
+  await expect(app.getByRole('button', { name: 'Stop speaking' })).toBeHidden();
+  await expect(app.locator('.herdr-voice-status')).toBeHidden();
+});
+
+test('paragraphs play while working and are not repeated by the final answer', async ({ page }) => {
+  const { app, state } = await voiceSetup(page);
+  await app.getByRole('button', { name: 'Start dictation' }).click({ delay: 650 });
+  await expect(app.locator('.herdr-voice-microphone')).toBeVisible();
+  state.response = {
+    session: 'session-a',
+    working: true,
+    paragraphs: [{ id: 'paragraph-one', text: 'First complete paragraph.' }],
+    answer: null,
+  };
+  await expect.poll(() => state.generated.length).toBe(1);
+  expect(state.generated[0].response_ids).toEqual(['paragraph-one']);
+  await finishSpeech(page);
+  state.response.paragraphs.push({ id: 'paragraph-two', text: 'Second complete paragraph.' });
+  await expect.poll(() => state.generated.length).toBe(2);
+  expect(state.generated[1].response_ids).toEqual(['paragraph-two']);
+  await finishSpeech(page);
+  state.response.working = false;
+  state.response.answer = {
+    id: 'final',
+    text: 'First complete paragraph.\n\nSecond complete paragraph.',
+  };
+  await page.waitForTimeout(2200);
+  expect(state.generated).toHaveLength(2);
+  await app.getByRole('button', { name: 'Read', exact: true }).click();
+  await expect.poll(() => state.generated.length).toBe(3);
+  expect(state.generated[2].response_id).toBe('final');
+});
+
+test('audio interruption cancels scheduled PCM instead of leaving Voice stuck', async ({
+  page,
+}) => {
+  const { app } = await voiceSetup(page);
+  await streamingFixture(page);
+  await app.getByRole('button', { name: 'Read', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.streamRequests.length)).toBe(1);
+  await page.evaluate(() => window.emitSpeech(true));
+  await expect.poll(() => page.evaluate(() => window.streamSources.length)).toBe(1);
+  await page.evaluate(() => {
+    window.streamContext.state = 'interrupted';
+    window.streamContext.stateChanged();
+  });
+  await expect(app.locator('.herdr-voice-status')).toContainText('Audio was interrupted');
+  await expect(app.getByRole('button', { name: 'Stop speaking' })).toBeHidden();
+  expect(await page.evaluate(() => window.streamSources.every(source => source.stopped))).toBe(
+    true
+  );
+});
+
+test('streaming aborts the host request if audio becomes unavailable before playback', async ({
+  page,
+}) => {
+  const { app } = await voiceSetup(page);
+  await streamingFixture(page);
+  await page.evaluate(() => (window.suspendBeforeSpeech = true));
+  await app.getByRole('button', { name: 'Read', exact: true }).click();
+  await expect(app.locator('.herdr-voice-status')).toContainText('Audio is paused');
+  expect(await page.evaluate(() => window.streamRequestAborted)).toBe(true);
+  expect(await page.evaluate(() => window.streamSources.length)).toBe(0);
 });

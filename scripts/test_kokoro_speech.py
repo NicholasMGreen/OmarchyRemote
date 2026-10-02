@@ -3,6 +3,7 @@
 import importlib.util
 from pathlib import Path
 import subprocess
+import struct
 import sys
 import tempfile
 import unittest
@@ -11,6 +12,52 @@ import wave
 
 @unittest.skipUnless(importlib.util.find_spec("kokoro_onnx"), "Kokoro is not installed")
 class KokoroSpeechTests(unittest.TestCase):
+    def test_stream_starts_before_generation_finishes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "input.txt"
+            output = Path(folder) / "unused.wav"
+            source.write_text(
+                "The first paragraph should play while later paragraphs are still being generated. "
+                "We are testing clear speech, natural pauses, and complete delivery.\n\n" * 15,
+                encoding="utf-8",
+            )
+            command = [
+                sys.executable, str(Path(__file__).with_name("kokoro-speech.py")),
+                "--text-file", str(source), "--wav-file", str(output),
+                "--format", "pcm-stream", "--voice", "bm_fable",
+                "--language", "en-gb", "--speed", "1.2",
+            ]
+            with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0) as child:
+                try:
+                    first = child.stdout.read(4)
+                    self.assertEqual(len(first), 4)
+                    self.assertIsNone(child.poll(), "Adapter waited until all speech was generated")
+                    rest, stderr = child.communicate(timeout=180)
+                finally:
+                    if child.poll() is None:
+                        child.kill()
+                self.assertEqual(child.returncode, 0, stderr.decode())
+            stream = first + rest
+            offset = 0
+            samples = 0
+            frames = 0
+            while offset < len(stream):
+                size, = struct.unpack_from("<I", stream, offset)
+                offset += 4
+                if size == 0:
+                    break
+                self.assertEqual(size % 2, 0)
+                self.assertLessEqual(size, 16384)
+                self.assertLessEqual(offset + size, len(stream))
+                samples += size // 2
+                frames += 1
+                offset += size
+            self.assertEqual(size, 0, "Missing successful end marker")
+            self.assertEqual(offset, len(stream))
+            self.assertGreater(samples / 24000, 60)
+            self.assertGreater(frames, 10)
+            self.assertFalse(output.exists())
+
     def test_blend_generates_audio_and_validates_ratios(self):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "input.txt"

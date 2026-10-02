@@ -2,6 +2,7 @@
 use crate::{ApiError, App, apps, dictation, error};
 use axum::{
     Json,
+    body::{Body, Bytes},
     extract::{Path, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
@@ -14,10 +15,11 @@ use std::{
     fs,
     io::{Read, Seek, SeekFrom},
     path::{Path as FsPath, PathBuf},
+    process::Stdio,
     sync::{LazyLock, Mutex},
     time::SystemTime,
 };
-use tokio::sync::Semaphore;
+use tokio::{io::AsyncReadExt, process::Command, sync::Semaphore};
 
 const MAX_TEXT: usize = 64 * 1024;
 const MAX_AUDIO: u64 = 32 * 1024 * 1024;
@@ -240,6 +242,52 @@ fn blocks(value: &Value) -> String {
         })
         .unwrap_or_default()
 }
+
+// Stable paragraph identities survive a growing message and its final record.
+// Only persisted assistant prose is eligible; an incomplete trailing paragraph waits.
+#[derive(Default)]
+struct Paragraphs(Vec<(String, String, bool)>);
+impl Paragraphs {
+    fn put(&mut self, key: String, text: String, complete: bool) {
+        if text.trim().is_empty() {
+            return;
+        }
+        if let Some((_, previous, finished)) = self.0.iter_mut().find(|(k, _, _)| *k == key) {
+            let same_prefix = !*finished
+                && previous
+                    .rsplit_once("\n\n")
+                    .is_some_and(|(prefix, _)| text.starts_with(prefix));
+            if text.starts_with(previous.as_str()) || same_prefix {
+                *previous = text;
+            } else if !previous.ends_with(&text) {
+                previous.push_str("\n\n");
+                previous.push_str(&text);
+            }
+            *finished |= complete;
+        } else {
+            self.0.push((key, text, complete));
+        }
+    }
+    fn values(&self) -> Vec<Value> {
+        let mut values = Vec::new();
+        for (key, text, complete) in &self.0 {
+            // Sanitize the entire message before splitting so fenced code cannot
+            // turn into speech when it contains blank lines.
+            let text = spoken(text);
+            let mut parts: Vec<_> = text.split("\n\n").collect();
+            if !complete {
+                parts.pop();
+            }
+            for (index, part) in parts.into_iter().enumerate() {
+                if !part.trim().is_empty() {
+                    values
+                        .push(json!({"key":format!("paragraph:{key}:{index}"),"text":part.trim()}));
+                }
+            }
+        }
+        values
+    }
+}
 fn parse(agent: &str, log: &str) -> Value {
     let mut answer = Value::Null;
     let mut updates: Vec<Value> = Vec::new();
@@ -247,6 +295,7 @@ fn parse(agent: &str, log: &str) -> Value {
     let mut active = false;
     let mut candidate = String::new();
     let mut candidate_id = String::new();
+    let mut paragraphs = Paragraphs::default();
     for (line_number, line) in log.lines().enumerate() {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -258,6 +307,9 @@ fn parse(agent: &str, log: &str) -> Value {
                 && p["phase"] == "final_answer"
             {
                 candidate = blocks(&p["content"]);
+                if active {
+                    paragraphs.put(format!("{turn}:final"), candidate.clone(), true);
+                }
             }
             if active
                 && !turn.is_null()
@@ -268,6 +320,7 @@ fn parse(agent: &str, log: &str) -> Value {
                 let text = blocks(&p["content"]);
                 if !text.trim().is_empty() {
                     let key = format!("update:{turn}:{}", updates.len());
+                    paragraphs.put(key.clone(), text.clone(), true);
                     updates.push(json!({"key":key,"text":text}));
                 }
             }
@@ -283,11 +336,13 @@ fn parse(agent: &str, log: &str) -> Value {
                         .or_else(|| v.get("timestamp").cloned())
                         .unwrap_or(json!(line_number));
                     updates.clear();
+                    paragraphs.0.clear();
                     active = true;
                     candidate.clear();
                 }
                 "turn_aborted" => {
                     updates.clear();
+                    paragraphs.0.clear();
                     turn = Value::Null;
                     active = false;
                     candidate.clear();
@@ -296,6 +351,7 @@ fn parse(agent: &str, log: &str) -> Value {
                     active = false;
                     let text = p["last_agent_message"].as_str().unwrap_or(&candidate);
                     if !text.trim().is_empty() {
+                        paragraphs.put(format!("{turn}:final"), text.to_owned(), true);
                         answer = json!({"key":p["turn_id"],"text":text});
                     }
                     candidate.clear();
@@ -324,6 +380,7 @@ fn parse(agent: &str, log: &str) -> Value {
                 if !tool_result {
                     turn = v.get("uuid").cloned().unwrap_or(json!(line_number));
                     updates.clear();
+                    paragraphs.0.clear();
                 }
                 active = true;
                 candidate.clear();
@@ -333,6 +390,18 @@ fn parse(agent: &str, log: &str) -> Value {
                 continue;
             }
             active = true;
+            if !turn.is_null() {
+                let message = m
+                    .get("id")
+                    .or_else(|| v.get("uuid"))
+                    .cloned()
+                    .unwrap_or(json!(line_number));
+                paragraphs.put(
+                    format!("{turn}:{message}"),
+                    blocks(&m["content"]),
+                    m["stop_reason"] == "end_turn" || m["stop_reason"] == "tool_use",
+                );
+            }
             // These are persisted assistant text blocks, not streaming deltas or thinking.
             if !turn.is_null() && m["stop_reason"] == "tool_use" {
                 let text = blocks(&m["content"]);
@@ -366,7 +435,7 @@ fn parse(agent: &str, log: &str) -> Value {
             active = false;
         }
     }
-    json!({"answer":answer,"updates":updates,"working":active})
+    json!({"answer":answer,"updates":updates,"paragraphs":paragraphs.values(),"working":active})
 }
 fn read_answer(agent: &str, path: &FsPath) -> anyhow::Result<Value> {
     let meta = fs::metadata(path)?;
@@ -399,6 +468,11 @@ fn read_answer(agent: &str, path: &FsPath) -> anyhow::Result<Value> {
             identify(update, &session);
         }
     }
+    if let Some(paragraphs) = value["paragraphs"].as_array_mut() {
+        for paragraph in paragraphs {
+            identify(paragraph, &session);
+        }
+    }
     let mut cache = READS.lock().unwrap();
     if cache.len() >= 32 {
         cache.clear();
@@ -413,6 +487,7 @@ fn identify(message: &mut Value, session: &str) {
 fn speech_message<'a>(value: &'a Value, id: &str) -> Option<&'a Value> {
     std::iter::once(&value["answer"])
         .chain(value["updates"].as_array().into_iter().flatten())
+        .chain(value["paragraphs"].as_array().into_iter().flatten())
         .find(|message| message["id"].as_str() == Some(id))
 }
 async fn latest(app: &App, pane: &str) -> anyhow::Result<Value> {
@@ -491,7 +566,7 @@ pub async fn status() -> Json<Value> {
 fn spoken(text: &str) -> String {
     let mut fence = None;
     let mut lines = Vec::new();
-    for line in text.lines() {
+    for line in text.split('\n') {
         let trimmed = line.trim_start();
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             let marker = &trimmed[..3];
@@ -514,6 +589,10 @@ fn spoken(text: &str) -> String {
 #[derive(Deserialize)]
 pub struct SpeechRequest {
     response_id: String,
+    #[serde(default)]
+    response_ids: Vec<String>,
+    #[serde(default)]
+    stream: bool,
 }
 pub async fn audio(
     State(app): State<App>,
@@ -521,14 +600,29 @@ pub async fn audio(
     Json(request): Json<SpeechRequest>,
 ) -> Result<Response, ApiError> {
     let value = latest(&app, &pane).await.map_err(error)?;
-    let Some(answer) = speech_message(&value, &request.response_id) else {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(json!({"error":"The response changed; read the latest answer"})),
-        ));
+    let ids = if request.response_ids.is_empty() {
+        vec![request.response_id]
+    } else {
+        request.response_ids
     };
+    if ids.len() > 64 {
+        return Err(error("Too many speech paragraphs"));
+    }
+    let mut messages = Vec::new();
+    for id in &ids {
+        let Some(message) = speech_message(&value, id) else {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({"error":"The response changed; read the latest answer"})),
+            ));
+        };
+        messages.push(message["text"].as_str().unwrap_or_default());
+    }
     let mut args = adapter().map_err(error)?;
-    let cache_key = format!("{}:{:?}", request.response_id, args);
+    // A host adapter opts into PCM streaming with the {format} placeholder.
+    // Old clients and adapters retain their complete-WAV contract.
+    let streaming = request.stream && args.iter().any(|arg| arg == "{format}");
+    let cache_key = format!("{ids:?}:{args:?}");
     if let Some(data) = AUDIO.lock().unwrap().get(&cache_key).cloned() {
         return Ok(wav(data));
     }
@@ -538,7 +632,7 @@ pub async fn audio(
             Json(json!({"error":"Speech is busy; try Replay shortly"})),
         )
     })?;
-    let text = spoken(answer["text"].as_str().unwrap_or_default());
+    let text = spoken(&messages.join("\n\n"));
     if text.is_empty() || text.len() > MAX_TEXT {
         return Err(error(
             "Response is empty or exceeds the 64 KiB speech limit",
@@ -553,7 +647,12 @@ pub async fn audio(
             *arg = input.to_string_lossy().into();
         } else if arg == "{audio}" {
             *arg = output.to_string_lossy().into();
+        } else if arg == "{format}" {
+            *arg = if streaming { "pcm-stream" } else { "wav" }.into();
         }
+    }
+    if streaming {
+        return stream_audio(args, dir, _permit, cache_key).map_err(error);
     }
     dictation::execute(&args, 180)
         .await
@@ -568,12 +667,126 @@ pub async fn audio(
     if !data.starts_with(b"RIFF") || data.get(8..12) != Some(b"WAVE") {
         return Err(error("Speech command must produce a WAV file"));
     }
+    cache_audio(cache_key, data.clone());
+    Ok(wav(data))
+}
+fn cache_audio(key: String, data: Vec<u8>) {
     let mut cache = AUDIO.lock().unwrap();
     if cache.values().map(Vec::len).sum::<usize>() + data.len() > 64 * 1024 * 1024 {
         cache.clear();
     }
-    cache.insert(cache_key, data.clone());
-    Ok(wav(data))
+    cache.insert(key, data);
+}
+
+// Framed mono 24 kHz PCM16. A zero frame is sent only after successful exit;
+// truncated output, timeouts, and failed commands therefore cannot look complete.
+const MAX_PCM_FRAME: usize = 2 * 1024 * 1024;
+async fn pcm_frame<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    total: &mut u64,
+) -> anyhow::Result<Vec<u8>> {
+    let size = reader.read_u32_le().await? as usize;
+    anyhow::ensure!(
+        size <= MAX_PCM_FRAME && size.is_multiple_of(2),
+        "Invalid PCM frame"
+    );
+    *total += size as u64;
+    anyhow::ensure!(*total <= MAX_AUDIO, "Speech audio exceeds 32 MiB");
+    let mut frame = vec![0; size + 4];
+    frame[..4].copy_from_slice(&(size as u32).to_le_bytes());
+    reader.read_exact(&mut frame[4..]).await?;
+    Ok(frame)
+}
+
+fn stream_audio(
+    args: Vec<String>,
+    dir: dictation::AudioDir,
+    permit: tokio::sync::SemaphorePermit<'static>,
+    cache_key: String,
+) -> anyhow::Result<Response> {
+    let executable = apps::resolve_program(&args[0])?;
+    let mut child = Command::new(executable)
+        .args(&args[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .kill_on_drop(true)
+        .spawn()?;
+    let group = dictation::ProcessGroup(
+        child
+            .id()
+            .ok_or_else(|| anyhow::anyhow!("Speech did not start"))?,
+    );
+    let stdout = child.stdout.take().unwrap();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(180);
+    let body = futures_util::stream::try_unfold(
+        (
+            child,
+            stdout,
+            dir,
+            permit,
+            group,
+            0_u64,
+            Vec::new(),
+            cache_key,
+            false,
+        ),
+        move |(mut child, mut pipe, dir, permit, group, mut total, mut pcm, key, ended)| async move {
+            if ended {
+                return Ok::<_, std::io::Error>(None);
+            }
+            let frame = tokio::time::timeout_at(deadline, async {
+                let frame = pcm_frame(&mut pipe, &mut total).await?;
+                if frame.len() == 4 {
+                    anyhow::ensure!(total > 0, "Speech stream is empty");
+                    let mut extra = [0];
+                    anyhow::ensure!(pipe.read(&mut extra).await? == 0, "Trailing PCM data");
+                    anyhow::ensure!(child.wait().await?.success(), "Speech command failed");
+                }
+                Ok::<_, anyhow::Error>(frame)
+            })
+            .await
+            .map_err(std::io::Error::other)?
+            .map_err(|_| std::io::Error::other("Speech stream failed"))?;
+            let ended = frame.len() == 4;
+            if ended {
+                cache_audio(key.clone(), pcm_wav(&pcm));
+                pcm.clear();
+            } else {
+                pcm.extend_from_slice(&frame[4..]);
+            }
+            Ok(Some((
+                Bytes::from(frame),
+                (child, pipe, dir, permit, group, total, pcm, key, ended),
+            )))
+        },
+    );
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/vnd.omarchy.pcm-stream"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        Body::from_stream(body),
+    )
+        .into_response())
+}
+fn pcm_wav(pcm: &[u8]) -> Vec<u8> {
+    let mut wav = Vec::with_capacity(pcm.len() + 44);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(pcm.len() as u32 + 36).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16_u32.to_le_bytes());
+    wav.extend_from_slice(&1_u16.to_le_bytes());
+    wav.extend_from_slice(&1_u16.to_le_bytes());
+    wav.extend_from_slice(&24000_u32.to_le_bytes());
+    wav.extend_from_slice(&48000_u32.to_le_bytes());
+    wav.extend_from_slice(&2_u16.to_le_bytes());
+    wav.extend_from_slice(&16_u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+    wav.extend_from_slice(pcm);
+    wav
 }
 fn wav(data: Vec<u8>) -> Response {
     (
@@ -620,6 +833,149 @@ pub async fn send(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::StreamExt;
+
+    #[tokio::test]
+    async fn stream_delivers_early_and_cancellation_cleans_up() {
+        static TEST_JOBS: Semaphore = Semaphore::const_new(1);
+        let dir = dictation::AudioDir::new().unwrap();
+        let path = dir.0.clone();
+        let response = stream_audio(
+            vec![
+                "sh".into(),
+                "-c".into(),
+                "printf '\\002\\000\\000\\000\\001\\000'; sleep 30".into(),
+            ],
+            dir,
+            TEST_JOBS.acquire().await.unwrap(),
+            "stream-cancel-test".into(),
+        )
+        .unwrap();
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "application/vnd.omarchy.pcm-stream"
+        );
+        let mut body = response.into_body().into_data_stream();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(2), body.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.as_ref(), &[2, 0, 0, 0, 1, 0]);
+        assert_eq!(TEST_JOBS.available_permits(), 0);
+        drop(body);
+        assert!(!path.exists());
+        assert_eq!(TEST_JOBS.available_permits(), 1);
+        assert!(!AUDIO.lock().unwrap().contains_key("stream-cancel-test"));
+    }
+
+    #[tokio::test]
+    async fn stream_requires_success_and_caches_only_complete_audio() {
+        static TEST_JOBS: Semaphore = Semaphore::const_new(1);
+        for (name, script, success) in [
+            (
+                "complete",
+                "printf '\\002\\000\\000\\000\\001\\000\\000\\000\\000\\000'",
+                true,
+            ),
+            (
+                "truncated",
+                "printf '\\002\\000\\000\\000\\001\\000'",
+                false,
+            ),
+            (
+                "failed",
+                "printf '\\002\\000\\000\\000\\001\\000\\000\\000\\000\\000'; exit 1",
+                false,
+            ),
+            ("odd", "printf '\\003\\000\\000\\000'", false),
+            ("huge", "printf '\\000\\000\\100\\000'", false),
+            ("empty", "printf '\\000\\000\\000\\000'", false),
+        ] {
+            let key = format!("stream-test-{name}");
+            let response = stream_audio(
+                vec!["sh".into(), "-c".into(), script.into()],
+                dictation::AudioDir::new().unwrap(),
+                TEST_JOBS.acquire().await.unwrap(),
+                key.clone(),
+            )
+            .unwrap();
+            let result = axum::body::to_bytes(response.into_body(), 100).await;
+            assert_eq!(result.is_ok(), success, "{name}");
+            let mut cache = AUDIO.lock().unwrap();
+            assert_eq!(cache.contains_key(&key), success, "{name}");
+            if success {
+                assert_eq!(cache.remove(&key).unwrap(), pcm_wav(&[1, 0]));
+            }
+        }
+    }
+
+    #[test]
+    fn paragraphs_are_stable_as_partial_prose_finishes() {
+        let mut prose = Paragraphs::default();
+        prose.put(
+            "turn:message".into(),
+            "First paragraph.\n\nUnfinished".into(),
+            false,
+        );
+        let first = prose.values();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0]["text"], "First paragraph.");
+        prose.put(
+            "turn:message".into(),
+            "First paragraph.\n\nFinished paragraph.".into(),
+            true,
+        );
+        let complete = prose.values();
+        assert_eq!(complete.len(), 2);
+        assert_eq!(complete[0], first[0]);
+        prose.put(
+            "turn:message".into(),
+            "First paragraph.\n\nFinished paragraph.".into(),
+            true,
+        );
+        assert_eq!(prose.values(), complete);
+        let mut boundary = Paragraphs::default();
+        boundary.put("boundary".into(), "Ready.\n\n".into(), false);
+        assert_eq!(boundary.values()[0]["text"], "Ready.");
+        boundary.put(
+            "code".into(),
+            "```\nsecret\n\nmore secret\n```\n\nSafe prose.".into(),
+            true,
+        );
+        assert!(!format!("{:?}", boundary.values()).contains("secret"));
+    }
+
+    #[test]
+    fn codex_final_paragraphs_are_available_before_task_complete_without_repeats() {
+        let mut rows = vec![
+            json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"one"}}),
+            json!({"type":"response_item","payload":{"role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"First.\n\nSecond."}]}}),
+        ];
+        let early = parse("codex", &log(&rows));
+        assert!(early["answer"].is_null());
+        assert_eq!(early["paragraphs"].as_array().unwrap().len(), 2);
+        rows.push(json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"one","last_agent_message":"First.\n\nSecond."}}));
+        assert_eq!(
+            parse("codex", &log(&rows))["paragraphs"],
+            early["paragraphs"]
+        );
+    }
+
+    #[test]
+    fn claude_exposes_only_complete_persisted_paragraphs_before_stop() {
+        let mut rows = vec![
+            json!({"type":"user","uuid":"turn","message":{"content":"Request"}}),
+            json!({"type":"assistant","message":{"id":"reply","stop_reason":null,"content":[{"type":"thinking","thinking":"secret"},{"type":"text","text":"First.\n\nSecond"}]}}),
+        ];
+        let early = parse("claude", &log(&rows));
+        assert_eq!(early["paragraphs"].as_array().unwrap().len(), 1);
+        assert_eq!(early["paragraphs"][0]["text"], "First.");
+        rows.push(json!({"type":"assistant","message":{"id":"reply","stop_reason":"end_turn","content":[{"type":"text","text":"First.\n\nSecond."}]}}));
+        let complete = parse("claude", &log(&rows));
+        assert_eq!(complete["paragraphs"].as_array().unwrap().len(), 2);
+        assert_eq!(complete["paragraphs"][0], early["paragraphs"][0]);
+    }
     #[test]
     fn codex_keeps_progress_separate_from_completed_answers() {
         let log = [

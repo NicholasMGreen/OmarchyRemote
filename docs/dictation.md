@@ -64,12 +64,12 @@ to the host and does not replace Apple's keyboard microphone globally.
 
 Hold the microphone for 550 ms to enable **Voice mode** while still pressing (release does not trigger another action), then tap the headphones button in the bottom bar to turn it off and stop recording or playback. Keyboard users can focus the microphone and press **Shift+Enter**. Voice mode enables a conversation loop using the same microphone:
 record, press again to transcribe, send, and listen to the assistant’s initial reply, progress updates, and completed answer.
-The host generates one WAV per whole text message; playback stays in order and never interrupts the previous message. **Read** works without
+The host generates speech for available completed paragraphs; playback stays in order and never interrupts the previous message. Kokoro can stream audio as it is generated; other adapters return complete WAV files. **Read** works without
 Voice mode; **Stop** stops playback or suppresses an in-flight generation. Starting
 a recording also stops playback. If the device blocks automatic audio, **Play
 answer** starts the ready recording explicitly.
 
-Voice mode starts from the current conversation position and speaks new assistant text only. It skips existing messages when enabled, reads progress while the agent works, and reads the final answer when the turn completes. Read still replays the latest completed answer. Pending progress belongs to the current turn and is discarded when a new turn or thread replaces it.
+Voice mode starts from the current conversation position and speaks new assistant text only. It skips existing messages when enabled, reads completed paragraphs while the agent works, and reads any remaining prose as it becomes available without repeating paragraphs at turn completion. Read still replays the latest completed answer. Pending progress belongs to the current turn and is discarded when a new turn or thread replaces it.
 Voice mode belongs to the Herdr view, not individual threads. Switching threads (including through the pane list) or changing the underlying agent session keeps Voice enabled but stops playback and leaves automatic readback silent. Read can replay the latest completed answer; sending a new voice message resumes automatic readback for new text. Unsupported threads pause voice with an explanation; selecting a supported thread resumes it. Switching cancels recording and pending transcription without inserting or sending them to either thread. Existing
 drafts and edits during transcription leave the transcript in the
 composer for manual sending. Busy agents accept voice messages through the same input path as normal Send and manage their own queue; voice does not stop at a busy-agent draft dialog. A failed or uncertain send keeps the draft and is
@@ -80,7 +80,7 @@ Progress and completed answers come from local Codex and Claude conversation log
 screens. Session identity comes from Herdr when available, otherwise the foreground
 Codex process's unique CLI rollout or Claude's PID/session record. For daemon-backed Codex terminals without an open rollout, Voice reads the local session database in read-only mode and requires a unique exact match between the terminal's conversation name and process working directory, then verifies the log's identity. It never picks a conversation merely because it is the newest in a folder. Ambiguous or
 unsupported sessions report an error rather than reading another thread. Worker
-responses, tool calls/results, and reasoning are excluded. Codex commentary messages and Claude’s persisted assistant text blocks are eligible progress; partial streaming text is excluded. Code fences are announced as omitted;
+responses, tool calls/results, and reasoning are excluded. Codex commentary/final messages and Claude’s persisted assistant text blocks are eligible prose. Completed paragraphs in a growing persisted block are eligible; incomplete trailing paragraphs, token deltas, and incomplete log records are excluded. Code fences are announced as omitted;
 Markdown links are spoken as their labels. Log formats are agent-version dependent.
 
 The default speech provider is [Piper](https://github.com/OHF-Voice/piper1-gpl):
@@ -134,7 +134,7 @@ argument array containing these entries, replacing the two example paths with
 absolute paths on your host (environment-variable expansion is not performed):
 
 ```sh
-OMARCHY_SPEECH_COMMAND='["/absolute/path/to/kokoro/venv/bin/python","/absolute/path/to/OmarchyRemote/scripts/kokoro-speech.py","--text-file","{text}","--wav-file","{audio}","--voice","af_heart"]'
+OMARCHY_SPEECH_COMMAND='["/absolute/path/to/kokoro/venv/bin/python","/absolute/path/to/OmarchyRemote/scripts/kokoro-speech.py","--text-file","{text}","--wav-file","{audio}","--voice","af_heart","--format","{format}"]'
 ```
 
 Restart `omarchy-remote.service` after updating its environment. This ends its
@@ -150,6 +150,39 @@ match the chosen language; see the [Kokoro voice catalog](https://huggingface.co
 local and produces 24 kHz PCM WAV audio. Each uncached request loads the model
 in its own process, so there is no persistent model service or idle memory use.
 The backend's existing audio cache avoids regenerating identical readbacks.
+
+Kokoro streaming is enabled by adding `"--format","{format}"` to that command.
+The server substitutes `pcm-stream` for clients with an unlocked Web Audio player,
+or `wav` for older clients and the complete-file fallback. Voice and speed flags
+are shared by both paths. Streaming starts playback as soon as the first model
+chunk arrives, while later chunks are generated. The model still loads once per
+uncached request; it is not a resident service. Completed streams are cached as
+WAV for replay. Canceled or failed streams are never cached.
+
+Voice mode also queues completed paragraphs from persisted assistant prose before
+the entire turn finishes. Paragraph IDs remain stable when the final answer arrives,
+so already-spoken text is not repeated. Available paragraphs are batched into one
+speech request; an incomplete trailing paragraph waits for its boundary or message
+completion. The app checks for new prose every second when it can play it. This is
+limited by the agent's transcript: if the CLI only writes a message when it finishes,
+we cannot speak its paragraphs earlier. Tool calls, reasoning, and worker text remain
+excluded. **Read** still reads the latest completed answer in full.
+
+The player schedules PCM chunks on a single Web Audio clock. Stop, starting a new
+recording, changing threads, and leaving the foreground abort the request and discard
+scheduled audio. The backend kills the adapter process group on disconnect. If Web
+Audio is unavailable or cannot be unlocked by a user gesture, the client requests the
+existing WAV path. Piper and other commands without `{format}` keep that path too.
+Streaming playback is validated in Chromium; real-device audio routing and interruptions
+still require checks on iOS, iPadOS, and visionOS.
+
+For custom streaming adapters, `pcm-stream` writes only binary audio frames to stdout:
+a four-byte unsigned little-endian payload length followed by mono 24 kHz signed
+16-bit little-endian PCM. Frames must have an even length, at most 2 MiB each and
+32 MiB total. A zero-length frame followed by EOF and successful process exit marks
+completion. Diagnostics belong on stderr. In this mode `{audio}` is unused; in `wav`
+mode the adapter must write the complete file there. Requests still have a three-minute
+generation deadline and only one generation runs at a time.
 
 To blend two voices, add `--blend-voice` and optionally `--blend-ratio` to the
 adapter arguments. For example, a 50/50 British male Fable/George blend uses:

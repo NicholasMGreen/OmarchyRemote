@@ -65,7 +65,7 @@ impl Drop for AudioDir {
     }
 }
 // Kill the whole adapter process group on timeout, cancellation, and completion.
-struct ProcessGroup(u32);
+pub(crate) struct ProcessGroup(pub(crate) u32);
 impl Drop for ProcessGroup {
     fn drop(&mut self) {
         unsafe {

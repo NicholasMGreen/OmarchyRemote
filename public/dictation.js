@@ -2,6 +2,103 @@
 (() => {
   const { node, button } = HyprlandUtil;
   let active = null;
+  // PCM v1 frames: u32 little-endian byte length, mono 24 kHz PCM16, zero EOF.
+  // Schedule on one audio clock so network boundaries never become audible gaps.
+  class SpeechStream {
+    constructor(context, signal, started) {
+      this.context = context;
+      this.signal = signal;
+      this.started = started;
+      this.sources = new Set();
+      this.nextTime = 0;
+      this.drained = new Promise(resolve => (this.resolve = resolve));
+      this.cancel = () => this.stop();
+      signal.addEventListener('abort', this.cancel, { once: true });
+      this.stateChanged = () => {
+        if (context.state === 'running') return;
+        this.interrupted = true;
+        this.stop();
+      };
+      context.addEventListener('statechange', this.stateChanged);
+    }
+    stop() {
+      this.stopped = true;
+      this.reader?.cancel().catch(() => {});
+      for (const source of this.sources) {
+        source.onended = null;
+        source.stop();
+        source.disconnect();
+      }
+      this.sources.clear();
+      this.resolve();
+    }
+    schedule(bytes) {
+      this.signal.throwIfAborted();
+      const samples = bytes.byteLength / 2;
+      const buffer = this.context.createBuffer(1, samples, 24000);
+      const channel = buffer.getChannelData(0);
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      for (let i = 0; i < samples; i++) channel[i] = view.getInt16(i * 2, true) / 32768;
+      const source = this.context.createBufferSource();
+      source.buffer = buffer;
+      source.connect(this.context.destination);
+      source.onended = () => {
+        source.disconnect();
+        this.sources.delete(source);
+        if (this.complete && !this.sources.size) this.resolve();
+      };
+      this.sources.add(source);
+      this.nextTime = Math.max(this.nextTime, this.context.currentTime + 0.06);
+      source.start(this.nextTime);
+      this.nextTime += buffer.duration;
+      this.started();
+    }
+    async play(response) {
+      this.reader = response.body.getReader();
+      let pending = new Uint8Array(0);
+      let ended = false;
+      let total = 0;
+      try {
+        while (true) {
+          this.signal.throwIfAborted();
+          const { done, value } = await this.reader.read();
+          this.signal.throwIfAborted();
+          if (done) break;
+          const bytes = new Uint8Array(pending.length + value.length);
+          bytes.set(pending);
+          bytes.set(value, pending.length);
+          let offset = 0;
+          while (offset + 4 <= bytes.length) {
+            if (ended) throw Error('Unexpected data after speech ended.');
+            const size = new DataView(bytes.buffer).getUint32(offset, true);
+            if (size > 2 * 1024 * 1024 || size % 2) throw Error('Invalid speech audio.');
+            if (offset + 4 + size > bytes.length) break;
+            offset += 4;
+            if (!size) {
+              ended = true;
+              continue;
+            }
+            total += size;
+            if (total > 32 * 1024 * 1024) throw Error('Speech audio is too large.');
+            this.schedule(bytes.subarray(offset, offset + size));
+            offset += size;
+          }
+          pending = bytes.slice(offset);
+        }
+        if (this.interrupted) throw Error('Audio was interrupted. Tap Read to resume.');
+        if (!ended || pending.length || !total) throw Error('Speech stream ended unexpectedly.');
+        this.complete = true;
+        if (!this.sources.size) this.resolve();
+        await this.drained;
+        this.signal.throwIfAborted();
+        if (this.interrupted) throw Error('Audio was interrupted. Tap Read to resume.');
+      } finally {
+        this.signal.removeEventListener('abort', this.cancel);
+        this.context.removeEventListener('statechange', this.stateChanged);
+        this.stop();
+      }
+    }
+  }
   class Voice {
     constructor(dictation, root, outputTools) {
       this.dictation = dictation;
@@ -52,7 +149,11 @@
       const response = await fetch(path, {
         ...options,
         headers: { 'X-Hyprland-Client': '1', 'Content-Type': 'application/json' },
-        signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(200000)]),
+        signal: AbortSignal.any([
+          this.abort.signal,
+          ...(options.signal ? [options.signal] : []),
+          AbortSignal.timeout(200000),
+        ]),
       });
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
@@ -68,6 +169,10 @@
     }
     stopPlayback() {
       ++this.playGeneration;
+      this.playAbort?.abort();
+      this.streamPlayer?.stop();
+      this.streamPlayer = null;
+      this.speaking = false;
       this.player.pause();
       this.needsPlay = false;
       this.replay.textContent = 'Read';
@@ -98,6 +203,15 @@
     // Prime this audio element during a user gesture. Platforms that still block playback
     // get an explicit Play answer button; never silently drop a completed answer.
     unlock() {
+      try {
+        const Context = window.AudioContext || window.webkitAudioContext;
+        if (Context) {
+          this.audioContext ||= new Context();
+          this.audioContext.resume().catch(() => {});
+        }
+      } catch {
+        // Complete-WAV playback remains available without Web Audio.
+      }
       if (this.player.src) return;
       this.player.src =
         'data:audio/wav;base64,UklGRiYAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQIAAAAAAA==';
@@ -132,7 +246,11 @@
         if (epoch !== this.epoch || pane !== this.dictation.getTarget()) return;
         this.pane = pane;
         this.session = value.session;
-        this.seen = new Set([value.answer?.id, ...(value.updates || []).map(update => update.id)]);
+        this.seen = new Set([
+          value.answer?.id,
+          ...(value.updates || []).map(update => update.id),
+          ...(value.paragraphs || []).map(part => part.id),
+        ]);
         this.enabled = true;
         this.ready = true;
         this.dictation.syncMicrophone();
@@ -161,19 +279,35 @@
           // Keep fetching while audio plays, but never interrupt it with the next update.
           // The host retains this turn's prose so updates arriving during playback stay ordered.
           if (this.autoRead && (!this.audioURL || this.player.paused) && !this.needsPlay) {
-            const messages = [...(value.updates || [])];
-            if (!value.working && value.answer) messages.push(value.answer);
+            const messages = value.paragraphs ? [...value.paragraphs] : [...(value.updates || [])];
+            if (!value.paragraphs && !value.working && value.answer) messages.push(value.answer);
             const next = messages.find(message => message.id && !this.seen.has(message.id));
             if (next) {
-              this.seen.add(next.id);
-              await this.speak(this.pane, next.id);
+              // Batch paragraphs already available into one synthesis request.
+              // Later paragraphs can join the next request without repeating these.
+              const batch = [next];
+              let length = next.text?.length || 0;
+              if (value.paragraphs) {
+                for (const message of messages.slice(messages.indexOf(next) + 1)) {
+                  if (this.seen.has(message.id)) continue;
+                  length += message.text?.length || 0;
+                  if (batch.length >= 32 || length > 12000) break;
+                  batch.push(message);
+                }
+              }
+              batch.forEach(message => this.seen.add(message.id));
+              await this.speak(
+                this.pane,
+                next.id,
+                batch.map(message => message.id)
+              );
             }
           }
         }
       } catch (e) {
         if (epoch === this.epoch) this.status(e.message);
       } finally {
-        if (epoch === this.epoch && this.enabled) this.timer = setTimeout(() => this.poll(), 3000);
+        if (epoch === this.epoch && this.enabled) this.timer = setTimeout(() => this.poll(), 1000);
       }
     }
     recordingStarted() {
@@ -217,6 +351,7 @@
         this.seen = new Set([
           latest.answer?.id,
           ...(latest.updates || []).map(update => update.id),
+          ...(latest.paragraphs || []).map(part => part.id),
         ]);
         // Explicit REST acknowledgement; never retry a send after a lost connection.
         await this.request(this.path(context.pane, 'voice-input'), {
@@ -260,13 +395,16 @@
         return;
       }
       this.abort ||= new AbortController();
+      this.stopPlayback();
       this.unlock();
       const epoch = this.epoch;
+      const generation = this.playGeneration;
       const pane = this.dictation.getTarget();
       try {
         const value = await this.latest(pane);
         if (
           epoch !== this.epoch ||
+          generation !== this.playGeneration ||
           pane !== this.dictation.getTarget() ||
           this.dictation.state !== 'idle'
         )
@@ -277,18 +415,44 @@
         if (epoch === this.epoch) this.status(e.message);
       }
     }
-    async speak(pane, id) {
+    async speak(pane, id, ids = [id]) {
       this.stopPlayback();
       const epoch = this.epoch;
       const generation = this.playGeneration;
       this.speaking = true;
+      this.playAbort = new AbortController();
+      const signal = this.playAbort.signal;
       this.stop.hidden = false;
       this.status('Generating speech on host…', false);
       try {
         const response = await this.request(this.path(pane, 'speech'), {
           method: 'POST',
-          body: JSON.stringify({ response_id: id }),
+          body: JSON.stringify({
+            response_id: id,
+            response_ids: ids,
+            stream: this.audioContext?.state === 'running',
+          }),
+          signal,
         });
+        signal.throwIfAborted();
+        if (
+          response.headers.get('Content-Type')?.startsWith('application/vnd.omarchy.pcm-stream')
+        ) {
+          if (this.audioContext?.state !== 'running') {
+            throw Error('Audio is paused. Tap Read to resume.');
+          }
+          const stream = new SpeechStream(this.audioContext, signal, () =>
+            this.status('Speaking', false)
+          );
+          this.streamPlayer = stream;
+          await stream.play(response);
+          if (epoch === this.epoch && generation === this.playGeneration) {
+            this.streamPlayer = null;
+            this.stop.hidden = true;
+            this.status(this.enabled ? 'Ready to talk' : '', false);
+          }
+          return;
+        }
         const blob = await response.blob();
         if (
           epoch !== this.epoch ||
@@ -316,15 +480,19 @@
         }
       } catch (e) {
         if (epoch === this.epoch && generation === this.playGeneration) {
+          this.playAbort.abort();
+          this.streamPlayer?.stop();
+          this.streamPlayer = null;
           this.status(e.message + ' Use Read to retry.');
           this.stop.hidden = true;
         }
       } finally {
-        if (epoch === this.epoch) this.speaking = false;
+        if (epoch === this.epoch && generation === this.playGeneration) this.speaking = false;
       }
     }
     dispose() {
       this.reset();
+      this.audioContext?.close().catch(() => {});
       this.row.remove();
       this.replay.remove();
       this.stop.remove();
@@ -371,6 +539,7 @@
       overlayRoot.append(this.notice);
       this.background = () => {
         if (document.hidden) this.cancelHolds.forEach(cancel => cancel());
+        if (document.hidden) this.voice.stopPlayback();
         if (document.hidden && ['starting', 'recording'].includes(this.state)) this.cancel();
       };
       document.addEventListener('visibilitychange', this.background);

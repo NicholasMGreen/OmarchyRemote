@@ -2,13 +2,36 @@
 """Local Kokoro adapter for OMARCHY_SPEECH_COMMAND; see docs/dictation.md."""
 
 import argparse
+import asyncio
 from pathlib import Path
+import struct
+import sys
+
+
+async def stream_audio(kokoro, text, voice, speed, language, output):
+    """PCM v1: little-endian u32 byte count, mono 24kHz s16le, zero terminator."""
+    import numpy as np
+
+    async for samples, rate in kokoro.create_stream(
+        text, voice=voice, speed=speed, lang=language
+    ):
+        if rate != 24000:
+            raise ValueError("Streaming requires 24 kHz audio")
+        pcm = (np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes()
+        for offset in range(0, len(pcm), 16384):
+            chunk = pcm[offset:offset + 16384]
+            output.write(struct.pack("<I", len(chunk)))
+            output.write(chunk)
+            output.flush()
+    output.write(struct.pack("<I", 0))
+    output.flush()
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--text-file", type=Path, required=True)
     parser.add_argument("--wav-file", type=Path, required=True)
+    parser.add_argument("--format", choices=["wav", "pcm-stream"], default="wav")
     parser.add_argument(
         "--model-dir",
         type=Path,
@@ -56,6 +79,11 @@ def main():
         if first.shape != second.shape:
             parser.error("voice styles must have matching shapes to blend")
         voice = first * args.blend_ratio + second * (1.0 - args.blend_ratio)
+    if args.format == "pcm-stream":
+        asyncio.run(stream_audio(
+            kokoro, text.decode("utf-8"), voice, args.speed, args.language, sys.stdout.buffer
+        ))
+        return
     samples, rate = kokoro.create(
         text.decode("utf-8"),
         voice=voice,
