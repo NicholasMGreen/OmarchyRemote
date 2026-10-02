@@ -2,6 +2,280 @@
 (() => {
   const { node, button } = HyprlandUtil;
   let active = null;
+  class Voice {
+    constructor(dictation, root) {
+      this.dictation = dictation;
+      this.epoch = 0;
+      this.player = new Audio();
+      this.player.preload = 'auto';
+      this.row = node('div', 'herdr-voice-controls');
+      this.toggleButton = button('Voice', () => this.toggle(), 'keycap small');
+      this.toggleButton.setAttribute('aria-label', 'Voice mode');
+      this.toggleButton.setAttribute('aria-pressed', 'false');
+      this.replay = button('Read last', () => this.readLast(), 'keycap small');
+      this.stop = button('Stop', () => this.stopPlayback(), 'keycap small');
+      this.stop.setAttribute('aria-label', 'Stop speaking');
+      this.stop.hidden = true;
+      this.message = node('span', 'remote-status');
+      this.message.setAttribute('role', 'status');
+      this.row.append(this.toggleButton, this.replay, this.stop, this.message);
+      root.append(this.row);
+      this.player.onended = () => {
+        this.stop.hidden = true;
+        this.message.textContent = this.enabled ? 'Ready to talk' : '';
+      };
+      this.player.onerror = () => {
+        this.stop.hidden = true;
+        this.message.textContent = 'Audio playback failed. Try Read last.';
+      };
+    }
+    async request(path, options = {}) {
+      const response = await fetch(path, {
+        ...options,
+        headers: { 'X-Hyprland-Client': '1', 'Content-Type': 'application/json' },
+        signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(200000)]),
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw Error(data.error || 'Voice connection failed.');
+      }
+      return response;
+    }
+    path(pane, suffix) {
+      return '/api/herdr/panes/' + encodeURIComponent(pane) + '/' + suffix;
+    }
+    async latest(pane) {
+      return (await this.request(this.path(pane, 'response'))).json();
+    }
+    stopPlayback() {
+      ++this.playGeneration;
+      this.player.pause();
+      this.needsPlay = false;
+      this.replay.textContent = 'Read last';
+      this.stop.hidden = true;
+      if (this.audioURL) URL.revokeObjectURL(this.audioURL);
+      this.audioURL = null;
+      this.player.removeAttribute('src');
+      this.message.textContent = this.enabled ? 'Ready to talk' : '';
+    }
+    reset() {
+      ++this.epoch;
+      this.enabled = false;
+      this.loading = false;
+      this.speaking = false;
+      clearTimeout(this.timer);
+      this.abort?.abort();
+      this.abort = new AbortController();
+      this.playGeneration = 0;
+      this.stopPlayback();
+      this.toggleButton.setAttribute('aria-pressed', 'false');
+      this.message.textContent = '';
+    }
+    // Prime this audio element during a user gesture. Platforms that still block playback
+    // get an explicit Play answer button; never silently drop a completed answer.
+    unlock() {
+      if (this.player.src) return;
+      this.player.src =
+        'data:audio/wav;base64,UklGRiYAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQIAAAAAAA==';
+      this.player.play().catch(() => {});
+    }
+    async toggle() {
+      if (this.enabled || this.loading) return this.reset();
+      this.reset();
+      this.unlock();
+      const epoch = this.epoch;
+      const pane = this.dictation.getTarget();
+      if (!pane) return;
+      this.loading = true;
+      this.message.textContent = 'Checking voice…';
+      try {
+        const provider = await (await this.request('/api/voice')).json();
+        if (!provider.available) throw Error(provider.message);
+        const value = await this.latest(pane);
+        if (epoch !== this.epoch || pane !== this.dictation.getTarget()) return;
+        this.pane = pane;
+        this.session = value.session;
+        this.seen = value.answer?.id;
+        this.enabled = true;
+        this.toggleButton.setAttribute('aria-pressed', 'true');
+        this.message.textContent = 'Voice on · recordings send automatically';
+        this.poll();
+      } catch (e) {
+        if (epoch === this.epoch) this.message.textContent = e.message;
+      } finally {
+        if (epoch === this.epoch) this.loading = false;
+      }
+    }
+    async poll() {
+      const epoch = this.epoch;
+      try {
+        if (!this.enabled || this.pane !== this.dictation.getTarget()) return;
+        if (!document.hidden && this.dictation.state === 'idle' && !this.speaking) {
+          const value = await this.latest(this.pane);
+          if (epoch !== this.epoch || this.dictation.state !== 'idle' || document.hidden) return;
+          if (value.session !== this.session) {
+            this.reset();
+            this.message.textContent = 'Conversation changed. Enable Voice again.';
+            return;
+          }
+          if (!value.working && value.answer?.id && value.answer.id !== this.seen) {
+            this.seen = value.answer.id;
+            await this.speak(this.pane, value.answer.id);
+          }
+        }
+      } catch (e) {
+        if (epoch === this.epoch) this.message.textContent = e.message;
+      } finally {
+        if (epoch === this.epoch && this.enabled) this.timer = setTimeout(() => this.poll(), 3000);
+      }
+    }
+    recordingStarted() {
+      this.stopPlayback();
+      this.dictation.input.saveDraft();
+      return this.enabled
+        ? { epoch: this.epoch, pane: this.pane, draft: this.dictation.input.draft }
+        : null;
+    }
+    async transcribed(context, text, recordingGeneration) {
+      const input = this.dictation.input;
+      if (
+        !context ||
+        context.epoch !== this.epoch ||
+        !this.enabled ||
+        recordingGeneration !== this.dictation.generation
+      )
+        return;
+      if (
+        context.pane !== this.dictation.getTarget() ||
+        context.draft.trim() ||
+        input.draft !== text
+      ) {
+        this.message.textContent = 'Saved as a draft; review and send when ready.';
+        return;
+      }
+      try {
+        const latest = await this.latest(context.pane);
+        if (
+          context.epoch !== this.epoch ||
+          recordingGeneration !== this.dictation.generation ||
+          !this.enabled ||
+          context.pane !== this.dictation.getTarget()
+        )
+          return;
+        if (
+          latest.session !== this.session ||
+          latest.can_send !== true ||
+          latest.working ||
+          input.draft !== text
+        ) {
+          this.message.textContent =
+            'Saved as a draft; the agent is busy or the conversation changed.';
+          return;
+        }
+        // Explicit REST acknowledgement; never retry a send after a lost connection.
+        await this.request(this.path(context.pane, 'voice-input'), {
+          method: 'POST',
+          body: JSON.stringify({ text, session: this.session }),
+        });
+        if (input.id === context.pane && input.draft === text) {
+          input.draft = '';
+          input.field.value = '';
+          input.storeDraft(context.pane, '');
+          input.dismiss();
+        }
+        if (context.epoch === this.epoch)
+          this.message.textContent = 'Sent · waiting for the answer';
+      } catch (e) {
+        if (context.epoch === this.epoch)
+          this.message.textContent =
+            'Could not confirm sending. Draft kept; check the thread before retrying.';
+      }
+    }
+    async readLast() {
+      if (this.dictation.state !== 'idle') {
+        this.message.textContent = 'Finish or cancel dictation before playing an answer.';
+        return;
+      }
+      if (this.needsPlay && this.audioURL && this.player.paused) {
+        const epoch = this.epoch;
+        const generation = this.playGeneration;
+        try {
+          await this.player.play();
+          if (epoch !== this.epoch || generation !== this.playGeneration) return;
+          this.stop.hidden = false;
+          this.replay.textContent = 'Read last';
+          this.needsPlay = false;
+        } catch {
+          if (epoch !== this.epoch || generation !== this.playGeneration) return;
+          this.message.textContent = 'Playback unavailable. Try again.';
+        }
+        return;
+      }
+      this.abort ||= new AbortController();
+      this.unlock();
+      const epoch = this.epoch;
+      const pane = this.dictation.getTarget();
+      try {
+        const value = await this.latest(pane);
+        if (
+          epoch !== this.epoch ||
+          pane !== this.dictation.getTarget() ||
+          this.dictation.state !== 'idle'
+        )
+          return;
+        if (!value.answer?.id) throw Error('No completed response yet.');
+        await this.speak(pane, value.answer.id);
+      } catch (e) {
+        if (epoch === this.epoch) this.message.textContent = e.message;
+      }
+    }
+    async speak(pane, id) {
+      this.stopPlayback();
+      const epoch = this.epoch;
+      const generation = this.playGeneration;
+      this.speaking = true;
+      this.stop.hidden = false;
+      this.message.textContent = 'Generating speech on host…';
+      try {
+        const response = await this.request(this.path(pane, 'speech'), {
+          method: 'POST',
+          body: JSON.stringify({ response_id: id }),
+        });
+        const blob = await response.blob();
+        if (
+          epoch !== this.epoch ||
+          generation !== this.playGeneration ||
+          pane !== this.dictation.getTarget()
+        )
+          return;
+        this.audioURL = URL.createObjectURL(blob);
+        this.player.src = this.audioURL;
+        try {
+          await this.player.play();
+          if (epoch !== this.epoch || generation !== this.playGeneration) return;
+          this.message.textContent = 'Speaking';
+        } catch {
+          if (epoch !== this.epoch || generation !== this.playGeneration) return;
+          this.message.textContent = 'Answer ready · tap Play answer';
+          this.replay.textContent = 'Play answer';
+          this.needsPlay = true;
+          this.stop.hidden = true;
+        }
+      } catch (e) {
+        if (epoch === this.epoch && generation === this.playGeneration) {
+          this.message.textContent = e.message + ' Use Read last to retry.';
+          this.stop.hidden = true;
+        }
+      } finally {
+        if (epoch === this.epoch) this.speaking = false;
+      }
+    }
+    dispose() {
+      this.reset();
+      this.row.remove();
+    }
+  }
+
   class Dictation {
     constructor(input, getTarget, statusRoot) {
       this.input = input;
@@ -23,6 +297,8 @@
         if (document.hidden && ['starting', 'recording'].includes(this.state)) this.cancel();
       };
       document.addEventListener('visibilitychange', this.background);
+      this.voice = new Voice(this, statusRoot);
+      this.voice.reset();
       this.paint('idle');
     }
     paint(state, message = '') {
@@ -46,6 +322,7 @@
       if (active && active !== this) active.cancel();
       active = this;
       this.target = this.getTarget();
+      this.voiceContext = this.voice.recordingStarted();
       this.audio = null;
       const generation = ++this.generation;
       this.paint('starting', 'Opening microphone…');
@@ -136,7 +413,11 @@
         if (!response.ok || typeof data.text !== 'string')
           throw Error(data.error || 'Transcription failed.');
         if (generation !== this.generation) return;
-        if (data.text.trim()) this.input.insertDictation(this.target, data.text.trim());
+        if (data.text.trim()) {
+          this.input.insertDictation(this.target, data.text.trim());
+          await this.voice.transcribed(this.voiceContext, data.text.trim(), generation);
+        }
+        if (generation !== this.generation) return;
         this.audio = null;
         this.paint(data.text.trim() ? 'idle' : 'error', 'No speech detected.');
         if (active === this) active = null;
@@ -169,6 +450,7 @@
     dispose() {
       this.cancel();
       document.removeEventListener('visibilitychange', this.background);
+      this.voice.dispose();
       this.button.remove();
       this.notice.remove();
     }

@@ -398,3 +398,5 @@ Anyone who can reach the address you publish can open a shell as you. Tailscale 
 [MIT](LICENSE). Bundled third-party components keep their own licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 Native visionOS builds are packaged with `scripts/package-ios-app.sh` and published with the same publishing script. The catalog labels them separately from iOS; the headset lists only visionOS builds. These downloads are installed through a paired Mac, so the dashboard does not offer an iOS manifest installer for them.
+
+Herdr **Voice** mode reuses host dictation, sends an unedited recording automatically when the composer was empty, and reads new completed Codex/Claude answers using host-generated audio. **Read last** and **Stop** are available independently. The host generates the whole response in one request with local Piper or a configurable speech command. Switching threads disables voice; drafts and uncertain sends are preserved. See [Voice conversations](docs/dictation.md#voice-conversations) for setup and foreground-only limitations.

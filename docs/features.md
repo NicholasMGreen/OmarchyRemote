@@ -346,3 +346,5 @@ Signed release validation also connects to a real private HTTPS host and verifie
 Android embedded pages keep square top corners beneath visible browser controls and round all corners when the controls are hidden or the page is a saved web app. Native scroll handling follows the toolbar visibility supplied by the shell.
 
 Native visionOS builds are packaged with `scripts/package-ios-app.sh` and published with the same publishing script. The catalog labels them separately from iOS; the headset lists only visionOS builds. These downloads are installed through a paired Mac, so the dashboard does not offer an iOS manifest installer for them.
+
+Herdr **Voice** mode reuses host dictation, sends an unedited recording automatically when the composer was empty, and reads new completed Codex/Claude answers using host-generated audio. **Read last** and **Stop** are available independently. The host generates the whole response in one request with local Piper or a configurable speech command. Switching threads disables voice; drafts and uncertain sends are preserved. See [Voice conversations](dictation.md#voice-conversations) for setup and foreground-only limitations.

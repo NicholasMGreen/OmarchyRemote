@@ -59,3 +59,54 @@ per-thread draft storage. Custom tools can have their own logging policies.
 Failed transcription retains audio in client memory for Retry until dismissed or
 the view closes. Backgrounding cancels recording. Dictation requires a connection
 to the host and does not replace Apple's keyboard microphone globally.
+
+## Voice conversations
+
+**Voice** in a Herdr pane enables a conversation loop using the same microphone:
+record, press again to transcribe, send, wait for the completed answer, and listen.
+The host generates one WAV for the whole response. **Read last** works without
+Voice mode; **Stop** stops playback or suppresses an in-flight generation. Starting
+a recording also stops playback. If the device blocks automatic audio, **Play
+answer** starts the ready recording explicitly.
+
+Voice mode starts from the current answer and speaks new completed answers only.
+Switching threads or changing the underlying agent session turns it off. Existing
+drafts, edits during transcription, and busy agents leave the transcript in the
+composer for manual sending. A failed or uncertain send keeps the draft and is
+never automatically retried. Voice mode is opt-in for the current view, not a saved
+preference. Normal dictation still never sends automatically.
+
+Completed answers come from local Codex and Claude conversation logs, not terminal
+screens. Session identity comes from Herdr when available, otherwise the foreground
+Codex process's unique CLI rollout or Claude's PID/session record. Ambiguous or
+unsupported sessions report an error rather than reading another thread. Worker
+responses, tools, and reasoning are excluded. Code fences are announced as omitted;
+Markdown links are spoken as their labels. Log formats are agent-version dependent.
+
+The default speech provider is [Piper](https://github.com/OHF-Voice/piper1-gpl):
+
+```sh
+uv tool install --python 3.12 piper-tts
+# Use the Python in the installed Piper environment:
+~/.local/share/uv/tools/piper-tts/bin/python -m piper.download_voices \
+  --data-dir ~/.local/share/omarchy-remote/voices en_US-lessac-medium
+```
+
+Choose another model with `OMARCHY_SPEECH_MODEL=/absolute/path/voice.onnx`, or set
+this host-only override in the backend service environment:
+
+```sh
+OMARCHY_SPEECH_COMMAND='["my-speech-adapter","--text-file","{text}","--wav-file","{audio}"]'
+```
+
+The JSON array runs directly without a shell. `{text}` is a private UTF-8 file;
+`{audio}` is the required output WAV path. Both must be separate arguments.
+Credentials and configuration stay on the host. A cloud adapter may send response
+text to its provider; Piper runs locally. Restart the backend after changing it.
+The adapter has three minutes, one generation runs at a time, and each response is
+limited to 64 KiB of speech text and 32 MiB of audio. Temporary files are removed;
+up to 64 MiB of generated audio is cached in server memory for Replay and cleared
+on restart. Audio is served through the authenticated host API, not a public URL.
+
+This first version runs while the app is foregrounded. It does not promise a
+screen-locked conversation loop or background microphone capture.

@@ -63,6 +63,7 @@
 }
 .herdr-input-bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   padding-top: 8px;
@@ -867,4 +868,22 @@
 }
 .herdr-split.herdr-sidebar-narrow.herdr-sidebar-hidden > .herdr-search-field {
   display: none;
+}
+
+.herdr-voice-controls {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 4px 0;
+}
+.herdr-voice-controls .remote-status {
+  flex: 1;
+  min-width: 120px;
+  font-size: 10px;
+}
+.herdr-voice-controls [aria-pressed='true'] {
+  color: var(--theme-accent);
+  border-color: currentColor;
 }

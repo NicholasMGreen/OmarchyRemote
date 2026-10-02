@@ -128,3 +128,249 @@ test('failed transcription can retry without recording again', async ({ page: p 
   await app.getByRole('button', { name: 'Retry', exact: true }).click();
   await expect(app.locator('textarea.native-input')).toHaveValue('recovered draft');
 });
+
+async function voiceSetup(page) {
+  await page.addInitScript(() => {
+    window.voicePlays = [];
+    window.Audio = class {
+      constructor() {
+        this.paused = true;
+        this.src = '';
+      }
+      play() {
+        if (window.blockVoicePlayback && this.src.startsWith('blob:')) {
+          this.paused = true;
+          return Promise.reject(new Error('User gesture required'));
+        }
+        this.paused = false;
+        if (window.deferVoicePlayback && this.src.startsWith('blob:')) {
+          return new Promise(resolve => {
+            window.releaseVoicePlayback = resolve;
+          });
+        }
+        window.voicePlays.push(this.src);
+        return Promise.resolve();
+      }
+      pause() {
+        this.paused = true;
+      }
+      removeAttribute() {
+        this.src = '';
+      }
+    };
+  });
+  const app = await setup(page);
+  const state = {
+    response: {
+      can_send: true,
+      session: 'session-a',
+      working: false,
+      answer: { id: 'old', text: 'Old answer' },
+    },
+    sent: [],
+    generated: [],
+  };
+  await page.route('**/api/voice', r => r.fulfill({ json: { available: true } }));
+  await page.route('**/api/herdr/panes/*/response', r => r.fulfill({ json: state.response }));
+  await page.route('**/api/herdr/panes/*/voice-input', async r => {
+    state.sent.push({ url: r.request().url(), data: r.request().postDataJSON() });
+    await r.fulfill({ json: { type: 'ok' } });
+  });
+  await page.route('**/api/herdr/panes/*/speech', r => {
+    state.generated.push(r.request().postDataJSON());
+    return r.fulfill({ contentType: 'audio/wav', body: 'fixture audio' });
+  });
+  return { app, state };
+}
+test('voice sends dictation once and reads only a new completed answer', async ({ page }) => {
+  const { app, state } = await voiceSetup(page);
+  await app.getByRole('button', { name: 'Voice mode' }).click();
+  await expect(app.getByRole('button', { name: 'Voice mode' })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  );
+  await app.getByRole('button', { name: 'Start dictation' }).click();
+  await app.getByRole('button', { name: 'Stop dictation' }).click();
+  await expect.poll(() => state.sent.length).toBe(1);
+  expect(state.sent[0].data).toEqual({ text: 'dictated words', session: 'session-a' });
+  expect(state.sent[0].url).toContain('/a/voice-input');
+  await expect(app.locator('textarea.native-input')).toHaveValue('');
+  state.response = { session: 'session-a', working: true, answer: { id: 'next', text: 'Answer' } };
+  await page.waitForTimeout(3200);
+  expect(state.generated).toEqual([]);
+  state.response.working = false;
+  await expect.poll(() => state.generated.length, { timeout: 6000 }).toBe(1);
+  expect(state.generated[0]).toEqual({ response_id: 'next' });
+  await expect(app.locator('.herdr-voice-controls')).toContainText('Speaking');
+  await page.waitForTimeout(3200);
+  expect(state.generated).toHaveLength(1);
+  await app.getByRole('button', { name: 'Stop speaking' }).click();
+  await expect(app.getByRole('button', { name: 'Stop speaking' })).toBeHidden();
+  await app.getByRole('button', { name: 'Read last', exact: true }).click();
+  await expect.poll(() => state.generated.length).toBe(2);
+});
+test('voice preserves an existing draft instead of automatically sending it', async ({ page }) => {
+  const { app, state } = await voiceSetup(page);
+  await app.getByRole('button', { name: 'Voice mode' }).click();
+  await expect(app.getByRole('button', { name: 'Voice mode' })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  );
+  await app.locator('textarea.native-input').fill('Unsent thought');
+  await app.getByRole('button', { name: 'Start dictation' }).click();
+  await app.getByRole('button', { name: 'Stop dictation' }).click();
+  await expect(app.locator('textarea.native-input')).toHaveValue('Unsent thought dictated words');
+  await expect(app.locator('.herdr-voice-controls')).toContainText('Saved as a draft');
+  expect(state.sent).toEqual([]);
+});
+test('changing thread during voice transcription keeps a draft and disables voice', async ({
+  page,
+}) => {
+  const { app, state } = await voiceSetup(page);
+  await app.getByRole('button', { name: 'Voice mode' }).click();
+  await expect(app.getByRole('button', { name: 'Voice mode' })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  );
+  let release;
+  const pending = new Promise(resolve => {
+    release = resolve;
+  });
+  await page.route('**/api/dictation', async r => {
+    if (r.request().method() === 'GET') return r.fulfill({ json: { available: true } });
+    await pending;
+    return r.fulfill({ json: { text: 'Keep in original thread' } });
+  });
+  await app.getByRole('button', { name: 'Start dictation' }).click();
+  await app.getByRole('button', { name: 'Stop dictation' }).click();
+  await app
+    .locator('.herdr-pane-tabs')
+    .getByRole('button', { name: 'Second', exact: true })
+    .click();
+  release();
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem('omarchy-herdr-drafts-v1')))
+    .toContain('Keep in original thread');
+  await expect(app.getByRole('button', { name: 'Voice mode' })).toHaveAttribute(
+    'aria-pressed',
+    'false'
+  );
+  expect(state.sent).toEqual([]);
+});
+test('voice send failure retains the draft without retrying', async ({ page }) => {
+  const { app } = await voiceSetup(page);
+  let attempts = 0;
+  await page.route('**/api/herdr/panes/*/voice-input', r => {
+    attempts++;
+    return r.abort();
+  });
+  await app.getByRole('button', { name: 'Voice mode' }).click();
+  await expect(app.getByRole('button', { name: 'Voice mode' })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  );
+  await app.getByRole('button', { name: 'Start dictation' }).click();
+  await app.getByRole('button', { name: 'Stop dictation' }).click();
+  await expect(app.locator('.herdr-voice-controls')).toContainText('Could not confirm sending');
+  await expect(app.locator('textarea.native-input')).toHaveValue('dictated words');
+  await page.waitForTimeout(3200);
+  expect(attempts).toBe(1);
+});
+test('stop during speech generation prevents late playback', async ({ page }) => {
+  const { app } = await voiceSetup(page);
+  let release;
+  const pending = new Promise(resolve => {
+    release = resolve;
+  });
+  await page.route('**/api/herdr/panes/*/speech', async r => {
+    await pending;
+    return r.fulfill({ contentType: 'audio/wav', body: 'fixture audio' });
+  });
+  await app.getByRole('button', { name: 'Read last', exact: true }).click();
+  await expect(app.locator('.herdr-voice-controls')).toContainText('Generating speech');
+  await app.getByRole('button', { name: 'Stop speaking' }).click();
+  release();
+  await page.waitForTimeout(300);
+  expect(await page.evaluate(() => window.voicePlays.filter(s => s.startsWith('blob:')))).toEqual(
+    []
+  );
+});
+
+test('a microphone recording suppresses a late Read last response', async ({ page }) => {
+  const { app, state } = await voiceSetup(page);
+  let release;
+  const pending = new Promise(resolve => {
+    release = resolve;
+  });
+  await page.route('**/api/herdr/panes/*/response', async r => {
+    await pending;
+    return r.fulfill({ json: state.response });
+  });
+  await app.getByRole('button', { name: 'Read last', exact: true }).click();
+  await app.getByRole('button', { name: 'Start dictation' }).click();
+  await expect(app.getByRole('button', { name: 'Stop dictation' })).toBeVisible();
+  release();
+  await page.waitForTimeout(300);
+  expect(state.generated).toEqual([]);
+});
+test('blocked autoplay exposes Play answer without regenerating audio', async ({ page }) => {
+  const { app, state } = await voiceSetup(page);
+  await page.evaluate(() => {
+    window.blockVoicePlayback = true;
+  });
+  await app.getByRole('button', { name: 'Read last', exact: true }).click();
+  await expect(app.getByRole('button', { name: 'Play answer', exact: true })).toBeVisible();
+  await page.evaluate(() => {
+    window.blockVoicePlayback = false;
+  });
+  await app.getByRole('button', { name: 'Play answer', exact: true }).click();
+  await expect(app.getByRole('button', { name: 'Stop speaking' })).toBeVisible();
+  expect(state.generated).toHaveLength(1);
+});
+
+test('canceling a pending Play answer does not restore stale playback controls', async ({
+  page,
+}) => {
+  const { app } = await voiceSetup(page);
+  await page.evaluate(() => {
+    window.blockVoicePlayback = true;
+  });
+  await app.getByRole('button', { name: 'Read last', exact: true }).click();
+  await expect(app.getByRole('button', { name: 'Play answer', exact: true })).toBeVisible();
+  await page.evaluate(() => {
+    window.blockVoicePlayback = false;
+    window.deferVoicePlayback = true;
+  });
+  await app.getByRole('button', { name: 'Play answer', exact: true }).click();
+  await app.getByRole('button', { name: 'Start dictation' }).click();
+  await expect(app.getByRole('button', { name: 'Stop dictation' })).toBeVisible();
+  await page.evaluate(() => window.releaseVoicePlayback());
+  await expect(app.getByRole('button', { name: 'Stop speaking' })).toBeHidden();
+});
+
+test('canceling before the voice send check completes never sends', async ({ page }) => {
+  const { app, state } = await voiceSetup(page);
+  await app.getByRole('button', { name: 'Voice mode' }).click();
+  await expect(app.getByRole('button', { name: 'Voice mode' })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  );
+  await app.getByRole('button', { name: 'Start dictation' }).click();
+  let release;
+  let checking = false;
+  const pending = new Promise(resolve => {
+    release = resolve;
+  });
+  await page.route('**/api/herdr/panes/*/response', async r => {
+    checking = true;
+    await pending;
+    return r.fulfill({ json: state.response });
+  });
+  await app.getByRole('button', { name: 'Stop dictation' }).click();
+  await expect.poll(() => checking).toBe(true);
+  await app.getByRole('button', { name: 'Cancel', exact: true }).click();
+  release();
+  await page.waitForTimeout(300);
+  expect(state.sent).toEqual([]);
+  await expect(app.locator('textarea.native-input')).toHaveValue('dictated words');
+});

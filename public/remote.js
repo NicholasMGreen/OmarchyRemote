@@ -1289,6 +1289,7 @@
       this.syncPanels();
     }
     select(id) {
+      if (id !== this.selected) this.dictation?.voice.reset();
       this.recentPanes = [
         ...new Set([id, this.selected, ...this.recentPanes].filter(Boolean)),
       ].slice(0, 40);

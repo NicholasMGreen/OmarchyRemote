@@ -51,9 +51,9 @@ pub async fn status() -> Json<Value> {
     };
     Json(json!({"available":available,"provider":provider,"message":message,"max_seconds":120}))
 }
-struct AudioDir(PathBuf);
+pub(crate) struct AudioDir(pub(crate) PathBuf);
 impl AudioDir {
-    fn new() -> anyhow::Result<Self> {
+    pub(crate) fn new() -> anyhow::Result<Self> {
         let path = std::env::temp_dir().join(format!("omarchy-dictation-{}", uuid::Uuid::new_v4()));
         fs::DirBuilder::new().mode(0o700).create(&path)?;
         Ok(Self(path))
@@ -73,7 +73,7 @@ impl Drop for ProcessGroup {
         }
     }
 }
-async fn execute(args: &[String], seconds: u64) -> anyhow::Result<String> {
+pub(crate) async fn execute(args: &[String], seconds: u64) -> anyhow::Result<String> {
     let executable = apps::resolve_program(&args[0])?;
     let mut child = Command::new(executable)
         .args(&args[1..])

@@ -9,6 +9,7 @@ mod herdr;
 mod preferences;
 mod terminal;
 mod uploads;
+mod voice;
 mod widgets;
 mod willreset;
 
@@ -567,6 +568,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/terminal/session", post(session))
         .route("/api/terminal/{id}/ws", get(terminal_upgrade))
         .route("/api/terminal/{id}/close", post(terminal_close))
+        .route("/api/voice", get(voice::status))
+        .route("/api/herdr/panes/{id}/response", get(voice::response))
+        .route("/api/herdr/panes/{id}/speech", post(voice::audio))
+        .route("/api/herdr/panes/{id}/voice-input", post(voice::send))
         .route("/api/herdr/snapshot", get(snapshot))
         .route("/api/herdr/workspaces", post(new_workspace))
         .route("/api/herdr/workspaces/{id}/tabs", post(new_tab))
