@@ -157,3 +157,45 @@ test('replies cannot run script and their links leave the app', async ({ page })
     0
   );
 });
+
+test('tapping the message box types and tapping the conversation hides the keyboard', async ({
+  page,
+}) => {
+  const { app, emit } = await setup(page);
+  await app.locator('.chat-row').click();
+  emit({ type: 'entry', id: 'x', index: 0, entry: entry('user', 'ignored') });
+  emit({
+    type: 'entry',
+    id: ID,
+    index: 2,
+    entry: entry('tool', 'pelican facts and a long query that runs past the edge', 'WebSearch'),
+  });
+  await expect(app.locator('.chat-tool')).toBeVisible();
+  const composer = app.locator('textarea.native-input');
+  await expect(composer).toBeHidden();
+  await app.getByRole('button', { name: 'Write a message' }).click();
+  await expect(composer).toBeFocused();
+  // The composer has no header row: no keyboard-dismiss or typing-mode button.
+  await expect(app.getByRole('button', { name: 'Hide keyboard' })).toBeHidden();
+  await expect(app.getByRole('button', { name: /mode/ })).toBeHidden();
+  await page.screenshot({ path: 'artifacts/browser/chat-thread-keyboard.png' });
+  await app.locator('.chat-message.assistant').first().click();
+  await expect(composer).toBeHidden();
+  await expect(app.getByRole('button', { name: 'Write a message' })).toBeVisible();
+  await page.screenshot({ path: 'artifacts/browser/chat-thread.png' });
+});
+
+test('an empty list invites a first chat', async ({ page }) => {
+  const { app, state } = await setup(page);
+  await page.unroute('**/api/chat');
+  await page.route('**/api/chat', r =>
+    r.fulfill({ json: { folder: '~/Chats', available: true, agent: 'claude', chats: [] } })
+  );
+  state.chats = [];
+  await page.reload();
+  await expect(app.getByRole('button', { name: 'Start a chat' })).toBeVisible();
+  await expect(app.locator('.chat-folder')).toHaveText('Saved in ~/Chats');
+  await page.screenshot({ path: 'artifacts/browser/chat-empty.png' });
+  await app.getByRole('button', { name: 'Start a chat' }).click();
+  await expect(app.locator('.chat-empty')).toContainText('Ask anything');
+});

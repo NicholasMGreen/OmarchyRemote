@@ -26,6 +26,28 @@
       link.rel = 'noopener noreferrer';
     }
   }
+  const ICONS = {
+    compose: 'M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z',
+    back: 'm15 18-6-6 6-6',
+    stop: 'M6 6h12v12H6Z',
+    tool: 'M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.4-.6-.6-2.4Z',
+  };
+  function icon(name) {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('aria-hidden', 'true');
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('d', ICONS[name]);
+    svg.append(path);
+    return svg;
+  }
+  function iconButton(name, label, fn, className) {
+    const b = button('', fn, 'chat-icon-button ' + className);
+    b.setAttribute('aria-label', label);
+    b.title = label;
+    b.append(icon(name));
+    return b;
+  }
   function ago(time) {
     const seconds = (Date.now() - Date.parse(time)) / 1000;
     if (!Number.isFinite(seconds)) return '';
@@ -46,22 +68,30 @@
       this.listView = node('section', 'chat-list-view');
       const listBar = node('div', 'chat-bar');
       listBar.append(node('h2', 'chat-heading', 'Chats'));
-      this.newButton = button('New chat', () => this.startNew(), 'remote-button chat-new');
+      this.newButton = iconButton('compose', 'New chat', () => this.startNew(), 'chat-new');
       listBar.append(this.newButton);
       this.list = node('div', 'chat-list');
       this.list.setAttribute('role', 'list');
+      this.empty = node('div', 'chat-list-empty');
+      this.empty.append(
+        node('span', 'chat-list-empty-icon', '\uf086'),
+        node('p', 'chat-list-empty-title', 'No chats yet'),
+        node('p', 'chat-list-empty-text', 'Ask Claude anything. No project needed.'),
+        button('Start a chat', () => this.startNew(), 'remote-button chat-start')
+      );
+      this.empty.hidden = true;
       this.listStatus = node('p', 'remote-status chat-folder');
-      this.listView.append(listBar, this.list, this.listStatus);
+      this.listView.append(listBar, this.list, this.empty, this.listStatus);
 
       this.threadView = node('section', 'chat-thread-view');
       this.threadView.hidden = true;
       const threadBar = node('div', 'chat-bar');
-      this.backButton = button('‹', () => this.showList(), 'remote-button chat-back');
-      this.backButton.setAttribute('aria-label', 'All chats');
+      this.backButton = iconButton('back', 'All chats', () => this.showList(), 'chat-back');
       this.title = node('h2', 'chat-title');
-      this.stopButton = button('Stop', () => this.stop(), 'remote-button chat-stop');
+      this.stopButton = iconButton('stop', 'Stop', () => this.stop(), 'chat-stop');
       this.stopButton.hidden = true;
-      threadBar.append(this.backButton, this.title, this.stopButton);
+      this.threadNew = iconButton('compose', 'New chat', () => this.startNew(), 'chat-new');
+      threadBar.append(this.backButton, this.title, this.stopButton, this.threadNew);
       this.messages = node('div', 'chat-messages');
       this.messages.setAttribute('role', 'log');
       this.messages.setAttribute('aria-live', 'polite');
@@ -82,8 +112,19 @@
         compactControls: true,
         draftStore: 'omarchy-chat-drafts-v1',
       });
-      // Chat is always a message; there is no terminal to send keys to.
-      this.nativeInput.mode.hidden = true;
+      // Chat is always a message: no terminal keys, and tapping the conversation hides the
+      // keyboard, so the composer needs no header row.
+      this.nativeInput.header.hidden = true;
+      this.messages.addEventListener('click', e => {
+        if (
+          window.__HYPRLAND_HARDWARE_KEYBOARD__ === true ||
+          this.nativeInput.element.hidden ||
+          e.target.closest('a, button') ||
+          !getSelection().isCollapsed
+        )
+          return;
+        this.nativeInput.dismiss();
+      });
       this.messages.onscroll = () => {
         this.following =
           this.messages.scrollHeight - this.messages.scrollTop - this.messages.clientHeight < 80;
@@ -180,11 +221,11 @@
           return row;
         })
       );
-      if (!this.available)
-        this.listStatus.textContent = `Claude Code is not installed on ${HyprlandApps.host.name}.`;
-      else if (!this.chats.length)
-        this.listStatus.textContent = `No chats yet. They are saved in ${this.folder || '~/Chats'}.`;
-      else this.listStatus.textContent = `Saved in ${this.folder}`;
+      this.empty.hidden = !!this.chats.length || this.available === false;
+      this.listStatus.textContent =
+        this.available === false
+          ? `Claude Code is not installed on ${HyprlandApps.host.name}.`
+          : `Saved in ${this.folder || '~/Chats'}`;
       this.newButton.disabled = this.available === false;
     }
     showList() {
@@ -199,6 +240,7 @@
       this.listView.hidden = true;
       this.threadView.hidden = false;
       this.nativeInput.select(this.chat.id || 'new');
+      this.nativeInput.field.placeholder = 'Message Claude…';
       this.following = true;
       this.render();
     }
@@ -292,8 +334,9 @@
     entry(entry) {
       if (entry.role === 'tool') {
         const tool = node('p', 'chat-tool');
-        tool.append(node('b', '', entry.name));
-        if (entry.text) tool.append(' ' + entry.text);
+        tool.append(icon('tool'), node('b', '', entry.name));
+        if (entry.text) tool.append(' ', node('span', '', entry.text));
+        tool.title = entry.text ? `${entry.name}: ${entry.text}` : entry.name;
         return tool;
       }
       const message = node('div', 'chat-message ' + entry.role);
@@ -314,6 +357,7 @@
       const chat = this.chat;
       this.stopButton.hidden = !chat?.busy || !chat.id;
       this.status.classList.toggle('error', !!chat?.error);
+      this.status.classList.toggle('thinking', !chat?.error && !!chat?.busy && !chat.partial);
       this.status.textContent = chat?.error
         ? chat.error
         : chat?.busy && !chat.partial
