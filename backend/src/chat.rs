@@ -66,6 +66,9 @@ struct Conversation {
     agent: String,
     /// The agent's own session id, for resuming.
     session: String,
+    /// Model alias and effort level for this chat; empty uses Claude's own setting.
+    model: String,
+    effort: String,
     title: String,
     created: String,
     updated: String,
@@ -83,7 +86,7 @@ impl Conversation {
         clip(&text.split_whitespace().collect::<Vec<_>>().join(" "), 160)
     }
     fn summary(&self) -> Value {
-        json!({"id":self.id,"agent":self.agent,"title":self.title,"created":self.created,"updated":self.updated,"preview":self.preview()})
+        json!({"id":self.id,"agent":self.agent,"model":self.model,"effort":self.effort,"title":self.title,"created":self.created,"updated":self.updated,"preview":self.preview()})
     }
     fn json(&self) -> Value {
         let mut value = self.summary();
@@ -105,6 +108,8 @@ impl Conversation {
             ("id", &self.id),
             ("agent", &self.agent),
             ("session", &self.session),
+            ("model", &self.model),
+            ("effort", &self.effort),
             ("title", &self.title),
             ("created", &self.created),
             ("updated", &self.updated),
@@ -152,6 +157,8 @@ impl Conversation {
             id: field("id"),
             agent: field("agent"),
             session: field("session"),
+            model: field("model"),
+            effort: field("effort"),
             title: field("title"),
             created: field("created"),
             updated: field("updated"),
@@ -294,6 +301,38 @@ fn tilde(path: &FsPath) -> String {
         None => path.display().to_string(),
     }
 }
+const EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+/// The models offered, as `[alias, label]` pairs; `OMARCHY_CHAT_MODELS` replaces the list.
+fn models() -> Vec<(String, String)> {
+    std::env::var("OMARCHY_CHAT_MODELS")
+        .ok()
+        .and_then(|list| serde_json::from_str(&list).ok())
+        .unwrap_or_else(|| {
+            [
+                ("fable", "Fable"),
+                ("opus", "Opus"),
+                ("sonnet", "Sonnet"),
+                ("haiku", "Haiku"),
+            ]
+            .map(|(id, label)| (id.to_owned(), label.to_owned()))
+            .into()
+        })
+}
+/// Only offered models and effort levels reach Claude's command line; empty means its default.
+fn valid_settings(model: &str, effort: &str) -> bool {
+    (model.is_empty() || models().iter().any(|(id, _)| id == model))
+        && (effort.is_empty() || EFFORTS.contains(&effort))
+}
+/// Claude's own default model and effort, from its user settings.
+fn defaults() -> (String, String) {
+    let settings: Value = claude_config()
+        .ok()
+        .and_then(|config| fs::read(config.join("settings.json")).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    let text = |key: &str| settings[key].as_str().unwrap_or_default().to_owned();
+    (text("model"), text("effortLevel"))
+}
 /// `~/Chats`, or `OMARCHY_CHAT_DIR` inside the home directory.
 fn root() -> anyhow::Result<PathBuf> {
     let home = apps::home()?;
@@ -392,6 +431,8 @@ struct Live {
     stopping: bool,
     /// Archived or deleted: nothing the agent does afterwards is saved.
     removed: bool,
+    /// The model and effort the running agent was started with.
+    started: (String, String),
 }
 impl Live {
     /// Applies one line of Claude's stream-json output; returns the events to broadcast.
@@ -562,6 +603,22 @@ impl Chats {
         if let Ok(extra) = std::env::var("OMARCHY_CHAT_CLAUDE_ARGS") {
             args.extend(serde_json::from_str::<Vec<String>>(&extra)?);
         }
+        let (model, effort) = (
+            live.conversation.model.clone(),
+            live.conversation.effort.clone(),
+        );
+        anyhow::ensure!(
+            valid_settings(&model, &effort),
+            "Unsupported model or effort"
+        );
+        if !model.is_empty() {
+            args.extend(["--model".into(), model.clone()]);
+        }
+        if !effort.is_empty() {
+            args.extend(["--effort".into(), effort.clone()]);
+        }
+        let mut live = live;
+        live.started = (model, effort);
         args.push(if resume { "--resume" } else { "--session-id" }.into());
         args.push(live.conversation.session.clone());
         let mut child = Command::new(apps::resolve_program("claude")?)
@@ -626,6 +683,19 @@ impl Chats {
         });
         Ok(running)
     }
+    /// Stops a conversation's agent so it can start again with other settings; returns its state.
+    async fn restart(&self, id: &str) -> Option<(Conversation, PathBuf)> {
+        let running = self.running.lock().unwrap().remove(id)?;
+        let state = {
+            let live = running.live.lock().unwrap();
+            (live.conversation.clone(), live.path.clone())
+        };
+        let mut child = running.child.lock().await;
+        let _ = child.start_kill();
+        // Both processes must never write the same session.
+        let _ = child.wait().await;
+        Some(state)
+    }
     /// Stops a conversation's agent for good, before its file is archived or deleted.
     async fn retire(&self, id: &str) {
         let running = self.running.lock().unwrap().remove(id);
@@ -686,10 +756,14 @@ pub async fn status(State(app): State<App>) -> Result<Json<Value>, ApiError> {
         })
         .collect();
     let available = apps::resolve_program("claude").is_ok();
+    let (model, effort) = defaults();
     Ok(Json(json!({
         "folder": tilde(&root),
         "available": available,
         "agent": "claude",
+        "models": models().iter().map(|(id, label)| json!({"id":id,"label":label})).collect::<Vec<_>>(),
+        "efforts": EFFORTS,
+        "defaults": {"model": model, "effort": effort},
         "chats": chats,
     })))
 }
@@ -720,6 +794,10 @@ pub struct Send {
     #[serde(default)]
     id: Option<String>,
     text: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
 }
 pub async fn send(
     State(app): State<App>,
@@ -732,20 +810,55 @@ pub async fn send(
             Json(json!({"error":"The message is empty or longer than 64 KiB"})),
         ));
     }
+    if !valid_settings(
+        request.model.as_deref().unwrap_or_default(),
+        request.effort.as_deref().unwrap_or_default(),
+    ) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"Unsupported model or effort"})),
+        ));
+    }
     let chats = app.chats.clone();
     let root = root().map_err(error)?;
     let folder = folder(&root).map_err(error)?;
+    // New settings take effect by starting the agent again; never in the middle of a reply.
+    let mut restarted = None;
+    if let Some(running) = request.id.as_deref().and_then(|id| chats.get(id)) {
+        let (busy, started) = {
+            let live = running.live.lock().unwrap();
+            (live.busy, live.started.clone())
+        };
+        let wanted = (
+            request.model.clone().unwrap_or_else(|| started.0.clone()),
+            request.effort.clone().unwrap_or_else(|| started.1.clone()),
+        );
+        if wanted != started {
+            if busy {
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(
+                        json!({"error":"Wait for the reply to finish before changing the model or effort"}),
+                    ),
+                ));
+            }
+            restarted = chats
+                .restart(request.id.as_deref().unwrap_or_default())
+                .await;
+        }
+    }
     let running = match request.id.as_deref().and_then(|id| chats.get(id)) {
         Some(running) => running,
         None => {
-            let (conversation, path, resume) = match &request.id {
-                Some(id) => {
+            let (mut conversation, path, resume) = match (&request.id, restarted) {
+                (Some(_), Some((conversation, path))) => (conversation, path, true),
+                (Some(id), None) => {
                     let path = find(&folder, id).map_err(|e| {
                         (StatusCode::NOT_FOUND, Json(json!({"error":e.to_string()})))
                     })?;
                     (load(&path).map_err(error)?, path, true)
                 }
-                None => {
+                (None, _) => {
                     let id = uuid::Uuid::new_v4().to_string();
                     let title = title(&text);
                     let created = now();
@@ -759,6 +872,8 @@ pub async fn send(
                         session: id.clone(),
                         id,
                         agent: "claude".into(),
+                        model: String::new(),
+                        effort: String::new(),
                         title,
                         updated: created.clone(),
                         created,
@@ -767,6 +882,12 @@ pub async fn send(
                     (conversation, path, false)
                 }
             };
+            if let Some(model) = &request.model {
+                conversation.model = model.clone();
+            }
+            if let Some(effort) = &request.effort {
+                conversation.effort = effort.clone();
+            }
             let live = Live {
                 conversation,
                 path,
@@ -777,6 +898,7 @@ pub async fn send(
                 used: Instant::now(),
                 stopping: false,
                 removed: false,
+                started: Default::default(),
             };
             chats.spawn(live, resume, &root).map_err(error)?
         }
@@ -972,6 +1094,8 @@ mod tests {
             id: "1b8ab544-8cc5-430e-8a40-0aec58bc3b10".into(),
             agent: "claude".into(),
             session: "1b8ab544-8cc5-430e-8a40-0aec58bc3b10".into(),
+            model: "opus".into(),
+            effort: "high".into(),
             title: "Plan \"dinner\": ideas".into(),
             created: "2026-10-03T10:00:00Z".into(),
             updated: "2026-10-03T10:01:00Z".into(),
@@ -1001,6 +1125,21 @@ mod tests {
         assert_eq!(
             conversation.preview(),
             "**Pasta** is quick. ``` <!-- omarchy-chat:user 2026 --> <!-- omarchy-chat:tool x y --> ``` **You**"
+        );
+    }
+
+    #[test]
+    fn settings_are_limited_to_offered_models_and_efforts() {
+        assert!(valid_settings("", ""));
+        assert!(valid_settings("opus", "xhigh"));
+        assert!(!valid_settings("--dangerously-skip-permissions", ""));
+        assert!(!valid_settings("opus", "extreme"));
+        // Files written before chats had settings still load, with Claude's defaults.
+        let old = "---\nid: \"1b8ab544-8cc5-430e-8a40-0aec58bc3b10\"\ntitle: \"Old\"\n---\n";
+        let conversation = Conversation::parse(old).unwrap();
+        assert_eq!(
+            (conversation.model.as_str(), conversation.effort.as_str()),
+            ("", "")
         );
     }
 
@@ -1044,6 +1183,7 @@ mod tests {
             used: Instant::now(),
             stopping: false,
             removed: false,
+            started: Default::default(),
         };
         let delta = |text: &str| json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":text}}});
         assert_eq!(live.apply(&delta("Hel"))[0]["seq"], 1);

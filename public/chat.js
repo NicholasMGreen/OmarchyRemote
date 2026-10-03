@@ -4,6 +4,8 @@
   const { node, button, storage } = window.HyprlandUtil;
   const headers = { 'X-Hyprland-Client': '1', 'Content-Type': 'application/json' };
   const OPEN = 'omarchy-chat-open';
+  // The model and effort chosen last; new chats start with them.
+  const SETTINGS = 'omarchy-chat-settings';
 
   async function request(path, body) {
     const response = await fetch(
@@ -115,7 +117,18 @@
       this.stopButton = iconButton('stop', 'Stop', () => this.stop(), 'chat-stop');
       this.stopButton.hidden = true;
       this.threadNew = iconButton('compose', 'New chat', () => this.startNew(), 'chat-new');
-      threadBar.append(this.backButton, this.title, this.stopButton, this.threadNew);
+      this.settingsButton = button('', () => this.toggleSettings(), 'chat-settings');
+      this.settingsButton.setAttribute('aria-expanded', 'false');
+      threadBar.append(
+        this.backButton,
+        this.title,
+        this.settingsButton,
+        this.stopButton,
+        this.threadNew
+      );
+      this.settingsPanel = node('div', 'chat-settings-panel');
+      this.settingsPanel.hidden = true;
+      this.options = { models: [], efforts: [], defaults: {} };
       this.messages = node('div', 'chat-messages');
       this.messages.setAttribute('role', 'log');
       this.messages.setAttribute('aria-live', 'polite');
@@ -127,7 +140,13 @@
       this.promptField.setAttribute('aria-label', 'Write a message');
       this.promptField.append(node('span', 'chat-placeholder', 'Message Claude…'));
       this.promptRow.append(this.promptField);
-      this.threadView.append(threadBar, this.messages, this.status, this.promptRow);
+      this.threadView.append(
+        threadBar,
+        this.settingsPanel,
+        this.messages,
+        this.status,
+        this.promptRow
+      );
       root.append(this.listView, this.threadView);
       // The shell gives the composer focus only while this detail view is showing.
       this.detail = this.threadView;
@@ -230,6 +249,12 @@
         this.chats = data.chats;
         this.folder = data.folder;
         this.available = data.available;
+        this.options = {
+          models: data.models || [],
+          efforts: data.efforts || [],
+          defaults: data.defaults || {},
+        };
+        this.renderSettings();
         this.renderList();
       } catch (e) {
         this.listStatus.textContent = e.message;
@@ -340,6 +365,8 @@
       this.refresh();
     }
     showThread() {
+      this.toggleSettings(false);
+      this.renderSettings();
       this.listView.hidden = true;
       this.threadView.hidden = false;
       this.nativeInput.select(this.chat.id || 'new');
@@ -348,7 +375,17 @@
       this.render();
     }
     startNew() {
-      this.chat = { id: null, title: 'New chat', entries: [], partial: '', seq: 0, busy: false };
+      const settings = storage.read(SETTINGS, {}) || {};
+      this.chat = {
+        id: null,
+        title: 'New chat',
+        entries: [],
+        partial: '',
+        seq: 0,
+        busy: false,
+        model: typeof settings.model === 'string' ? settings.model : '',
+        effort: typeof settings.effort === 'string' ? settings.effort : '',
+      };
       storage.set(OPEN, null);
       this.showThread();
       this.bridge.keyboard();
@@ -386,7 +423,12 @@
         chat.busy = true;
         this.render();
       }
-      request('/send', { id: chat.id, text })
+      request('/send', {
+        id: chat.id,
+        text,
+        model: chat.model || '',
+        effort: chat.effort || '',
+      })
         .then(({ id }) => {
           // A new chat learns its id here; its state so far comes from the host.
           if (!chat.id && this.chat === chat) this.open(id);
@@ -407,6 +449,60 @@
             this.render();
           }
         });
+    }
+    // Model and effort apply from the next message; the host restarts the chat's agent for them.
+    toggleSettings(open = this.settingsPanel.hidden) {
+      this.settingsPanel.hidden = !open;
+      this.settingsButton.setAttribute('aria-expanded', String(open));
+      if (open) this.renderSettings();
+    }
+    choose(key, value) {
+      if (!this.chat) return;
+      this.chat[key] = value;
+      storage.write(SETTINGS, { model: this.chat.model || '', effort: this.chat.effort || '' });
+      this.renderSettings();
+    }
+    renderSettings() {
+      const chat = this.chat;
+      if (!chat) return;
+      const { models, efforts, defaults } = this.options;
+      const short = model => String(model || '').replace(/^claude-/, '');
+      const model = models.find(m => m.id === chat.model)?.label || chat.model;
+      this.settingsButton.textContent = `${model || short(defaults.model) || 'Default'} · ${
+        chat.effort || defaults.effort || 'default'
+      }`;
+      this.settingsButton.setAttribute(
+        'aria-label',
+        'Model and effort: ' + this.settingsButton.textContent
+      );
+      if (this.settingsPanel.hidden) return;
+      const group = (label, key, choices) => {
+        const row = node('div', 'chat-settings-row');
+        row.setAttribute('role', 'group');
+        row.setAttribute('aria-label', label);
+        row.append(node('span', 'chat-settings-label', label));
+        for (const [value, text] of choices) {
+          const option = button(text, () => this.choose(key, value), 'chat-option');
+          option.setAttribute('aria-pressed', String((chat[key] || '') === value));
+          row.append(option);
+        }
+        return row;
+      };
+      this.settingsPanel.replaceChildren(
+        group('Model', 'model', [
+          ['', defaults.model ? `Default (${short(defaults.model)})` : 'Default'],
+          ...models.map(m => [m.id, m.label]),
+        ]),
+        group('Effort', 'effort', [
+          ['', defaults.effort ? `Default (${defaults.effort})` : 'Default'],
+          ...efforts.map(e => [e, e]),
+        ]),
+        node(
+          'p',
+          'chat-settings-note',
+          chat.id ? 'Changes apply from your next message.' : 'Applies to this new chat.'
+        )
+      );
     }
     async stop() {
       if (!this.chat?.id) return;

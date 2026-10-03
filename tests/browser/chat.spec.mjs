@@ -35,7 +35,20 @@ async function setup(page, extra = []) {
   };
   await page.route('**/api/**', r => r.abort());
   await page.route('**/api/chat', r =>
-    r.fulfill({ json: { folder: '~/Chats', available: true, agent: 'claude', chats: state.chats } })
+    r.fulfill({
+      json: {
+        folder: '~/Chats',
+        available: true,
+        agent: 'claude',
+        models: [
+          { id: 'fable', label: 'Fable' },
+          { id: 'opus', label: 'Opus' },
+        ],
+        efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+        defaults: { model: 'claude-fable-5-1', effort: 'high' },
+        chats: state.chats,
+      },
+    })
   );
   await page.route('**/api/chat/send', async r => {
     const body = r.request().postDataJSON();
@@ -110,7 +123,9 @@ test('a new chat streams its reply, shows tools, and can be stopped', async ({ p
   const field = app.locator('textarea.native-input');
   await field.fill('What is a pelican?');
   await field.press('Enter');
-  await expect.poll(() => state.sent).toEqual([{ id: null, text: 'What is a pelican?' }]);
+  await expect
+    .poll(() => state.sent)
+    .toEqual([{ id: null, text: 'What is a pelican?', model: '', effort: '' }]);
   // The tool event can arrive before the new chat has loaded; it still appears once.
   await expect(app.locator('.chat-title')).toHaveText('What is a pelican?');
   await expect(app.locator('.chat-message.user')).toHaveText('What is a pelican?');
@@ -284,4 +299,49 @@ test('a chat removed elsewhere closes if it is open', async ({ page }) => {
   await expect(app.locator('.chat-title')).toHaveText('Dinner ideas');
   emit({ type: 'removed', ids: [ID] });
   await expect(app.locator('.chat-heading')).toHaveText('Chats');
+});
+
+test('model and effort are chosen per chat and remembered for new chats', async ({ page }) => {
+  const { app, state } = await setup(page);
+  await app.getByRole('button', { name: 'New chat' }).click();
+  const chip = app.locator('.chat-settings');
+  await expect(chip).toHaveText('fable-5-1 · high');
+  await chip.click();
+  const model = app.getByRole('group', { name: 'Model' });
+  const effort = app.getByRole('group', { name: 'Effort' });
+  await expect(model.getByRole('button', { name: 'Default (fable-5-1)' })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  );
+  await model.getByRole('button', { name: 'Opus' }).click();
+  await effort.getByRole('button', { name: 'xhigh' }).click();
+  await expect(chip).toHaveText('Opus · xhigh');
+  await expect(model.getByRole('button', { name: 'Opus' })).toHaveAttribute('aria-pressed', 'true');
+  await page.screenshot({ path: 'artifacts/browser/chat-settings.png' });
+  const field = app.locator('textarea.native-input');
+  await field.fill('Hello');
+  await field.press('Enter');
+  await expect
+    .poll(() => state.sent)
+    .toEqual([{ id: null, text: 'Hello', model: 'opus', effort: 'xhigh' }]);
+  // The next new chat starts with the same choice.
+  await app.getByRole('button', { name: 'New chat' }).click();
+  await expect(chip).toHaveText('Opus · xhigh');
+  // An existing chat shows its own settings, and a change goes with the next message.
+  state.conversations[ID].model = 'fable';
+  state.conversations[ID].effort = '';
+  await app.getByRole('button', { name: 'All chats' }).click();
+  await app.locator('.chat-row').first().click();
+  await expect(chip).toHaveText('Fable · high');
+  await chip.click();
+  await expect(app.locator('.chat-settings-note')).toHaveText(
+    'Changes apply from your next message.'
+  );
+  await effort.getByRole('button', { name: 'low' }).click();
+  await app.getByRole('button', { name: 'Write a message' }).click();
+  await field.fill('Again');
+  await field.press('Enter');
+  await expect
+    .poll(() => state.sent.at(-1))
+    .toEqual({ id: ID, text: 'Again', model: 'fable', effort: 'low' });
 });
