@@ -147,16 +147,22 @@ Use `--voice`, `--speed` (0.5–2.0), and `--language` to customize it. Voices m
 match the chosen language; see the [Kokoro voice catalog](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md).
 `--model-dir` changes the model location and `--threads` controls CPU inference
 (four threads by default). Downloads happen only during setup; generation is
-local and produces 24 kHz PCM WAV audio. Each uncached request loads the model
-in its own process, so there is no persistent model service or idle memory use.
-The backend's existing audio cache avoids regenerating identical readbacks.
+local and produces 24 kHz PCM WAV audio. The first request starts a background
+worker that keeps the model loaded and exits after ten idle minutes, so later
+requests skip about half a second of loading (a short sentence takes about 0.2
+seconds instead of 0.65). The worker listens on a socket in
+`$XDG_RUNTIME_DIR/omarchy-remote/` that only your user can open. Its name includes
+the script and model files, so after an update the next request starts a new worker.
+It uses a few hundred megabytes of memory while loaded. Add `--no-server` to load
+the model in each request's own process instead; the adapter also falls back to
+that when the worker cannot start. The backend's existing audio cache avoids
+regenerating identical readbacks.
 
 Kokoro streaming is enabled by adding `"--format","{format}"` to that command.
 The server substitutes `pcm-stream` for clients with an unlocked Web Audio player,
 or `wav` for older clients and the complete-file fallback. Voice and speed flags
 are shared by both paths. Streaming starts playback as soon as the first model
-chunk arrives, while later chunks are generated. The model still loads once per
-uncached request; it is not a resident service. Completed streams are cached as
+chunk arrives, while later chunks are generated. Completed streams are cached as
 WAV for replay. Canceled or failed streams are never cached.
 
 Voice mode also queues completed paragraphs from persisted assistant prose before

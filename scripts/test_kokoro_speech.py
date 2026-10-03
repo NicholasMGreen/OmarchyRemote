@@ -1,17 +1,84 @@
 """Optional real-model checks; run with the Kokoro virtual environment's Python."""
 
 import importlib.util
+import os
 from pathlib import Path
 import subprocess
 import struct
 import sys
 import tempfile
+import time
 import unittest
 import wave
+
+WORKER_ENVIRONMENT = ["OMARCHY_KOKORO_SOCKET_DIR", "OMARCHY_KOKORO_WORKER_IDLE"]
 
 
 @unittest.skipUnless(importlib.util.find_spec("kokoro_onnx"), "Kokoro is not installed")
 class KokoroSpeechTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Workers started here use their own socket folder and exit soon after the tests.
+        cls.sockets = tempfile.TemporaryDirectory()
+        cls.environment = {key: os.environ.get(key) for key in WORKER_ENVIRONMENT}
+        os.environ["OMARCHY_KOKORO_SOCKET_DIR"] = cls.sockets.name
+        os.environ["OMARCHY_KOKORO_WORKER_IDLE"] = "3"
+
+    @classmethod
+    def tearDownClass(cls):
+        for key, value in cls.environment.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        cls.sockets.cleanup()
+
+    def worker_sockets(self):
+        return list((Path(self.sockets.name) / "omarchy-remote").glob("kokoro-*.sock"))
+
+    def speak(self, folder, *options):
+        source = Path(folder) / "input.txt"
+        output = Path(folder) / "output.wav"
+        source.write_text("A short sentence to speak.", encoding="utf-8")
+        command = [
+            sys.executable, str(Path(__file__).with_name("kokoro-speech.py")),
+            "--text-file", str(source), "--wav-file", str(output), *options,
+        ]
+        return subprocess.run(command, capture_output=True, timeout=180), output
+
+    def test_worker_keeps_the_model_loaded_between_requests(self):
+        with tempfile.TemporaryDirectory() as folder:
+            started = time.monotonic()
+            result, output = self.speak(folder)
+            cold = time.monotonic() - started
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            self.assertTrue(output.exists())
+            [worker] = self.worker_sockets()
+            identity = worker.stat().st_ino
+            output.unlink()
+            started = time.monotonic()
+            result, output = self.speak(folder)
+            warm = time.monotonic() - started
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            with wave.open(str(output)) as wav:
+                self.assertEqual(wav.getframerate(), 24000)
+                self.assertGreater(wav.getnframes(), 0)
+            # The same worker answered, without loading the model again.
+            self.assertEqual(worker.stat().st_ino, identity)
+            self.assertLess(warm, cold)
+
+    def test_worker_reports_errors_and_exits_when_idle(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result, output = self.speak(folder, "--voice", "no_such_voice")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(b"Kokoro:", result.stderr)
+            self.assertFalse(output.exists())
+            self.assertTrue(self.worker_sockets())
+            deadline = time.monotonic() + 15
+            while self.worker_sockets() and time.monotonic() < deadline:
+                time.sleep(0.2)
+            self.assertEqual(self.worker_sockets(), [])
+
     def test_stream_starts_before_generation_finishes(self):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "input.txt"
@@ -65,7 +132,7 @@ class KokoroSpeechTests(unittest.TestCase):
             script = str(Path(__file__).with_name("kokoro-speech.py"))
             arguments = [
                 "--text-file", str(source), "--wav-file", str(Path(folder) / "unused.wav"),
-                "--format", "pcm-stream",
+                "--format", "pcm-stream", "--no-server",
             ]
             # Writes to stdout once the adapter has loaded, as a noisy library would.
             noisy = (
