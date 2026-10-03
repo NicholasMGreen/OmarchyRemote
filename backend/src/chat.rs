@@ -324,14 +324,59 @@ fn valid_settings(model: &str, effort: &str) -> bool {
         && (effort.is_empty() || EFFORTS.contains(&effort))
 }
 /// Claude's own default model and effort, from its user settings.
+/// What a chat left on Default runs with: `OMARCHY_CHAT_DEFAULT_MODEL` and
+/// `OMARCHY_CHAT_DEFAULT_EFFORT` when set to offered values, otherwise Claude's own settings.
 fn defaults() -> (String, String) {
+    let (model, effort) = configured();
     let settings: Value = claude_config()
         .ok()
         .and_then(|config| fs::read(config.join("settings.json")).ok())
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
     let text = |key: &str| settings[key].as_str().unwrap_or_default().to_owned();
-    (text("model"), text("effortLevel"))
+    (
+        if model.is_empty() {
+            text("model")
+        } else {
+            model
+        },
+        if effort.is_empty() {
+            text("effortLevel")
+        } else {
+            effort
+        },
+    )
+}
+/// Chat's own defaults from the backend environment; empty leaves the choice to Claude.
+fn configured() -> (String, String) {
+    let read = |key: &str| std::env::var(key).unwrap_or_default().trim().to_owned();
+    let (model, effort) = (
+        read("OMARCHY_CHAT_DEFAULT_MODEL"),
+        read("OMARCHY_CHAT_DEFAULT_EFFORT"),
+    );
+    (
+        if valid_settings(&model, "") {
+            model
+        } else {
+            String::new()
+        },
+        if valid_settings("", &effort) {
+            effort
+        } else {
+            String::new()
+        },
+    )
+}
+/// The `--model` and `--effort` a chat runs with: its own choice, or Chat's configured default.
+fn effective(model: &str, effort: &str, configured: &(String, String)) -> (String, String) {
+    let pick = |own: &str, fallback: &str| {
+        if own.is_empty() {
+            fallback.to_owned()
+        } else {
+            own.to_owned()
+        }
+    };
+    (pick(model, &configured.0), pick(effort, &configured.1))
 }
 /// `~/Chats`, or `OMARCHY_CHAT_DIR` inside the home directory.
 fn root() -> anyhow::Result<PathBuf> {
@@ -611,11 +656,13 @@ impl Chats {
             valid_settings(&model, &effort),
             "Unsupported model or effort"
         );
-        if !model.is_empty() {
-            args.extend(["--model".into(), model.clone()]);
+        // `started` keeps the chat's own choice, so Default never looks like a change.
+        let (flag_model, flag_effort) = effective(&model, &effort, &configured());
+        if !flag_model.is_empty() {
+            args.extend(["--model".into(), flag_model]);
         }
-        if !effort.is_empty() {
-            args.extend(["--effort".into(), effort.clone()]);
+        if !flag_effort.is_empty() {
+            args.extend(["--effort".into(), flag_effort]);
         }
         let mut live = live;
         live.started = (model, effort);
@@ -1134,6 +1181,16 @@ mod tests {
         assert!(valid_settings("opus", "xhigh"));
         assert!(!valid_settings("--dangerously-skip-permissions", ""));
         assert!(!valid_settings("opus", "extreme"));
+        // Default uses Chat's configured model, and a chat's own choice wins over it.
+        let configured = ("opus".to_owned(), String::new());
+        assert_eq!(
+            effective("", "", &configured),
+            ("opus".into(), String::new())
+        );
+        assert_eq!(
+            effective("haiku", "low", &configured),
+            ("haiku".into(), "low".into())
+        );
         // Files written before chats had settings still load, with Claude's defaults.
         let old = "---\nid: \"1b8ab544-8cc5-430e-8a40-0aec58bc3b10\"\ntitle: \"Old\"\n---\n";
         let conversation = Conversation::parse(old).unwrap();
