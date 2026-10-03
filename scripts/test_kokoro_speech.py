@@ -58,6 +58,41 @@ class KokoroSpeechTests(unittest.TestCase):
             self.assertGreater(frames, 10)
             self.assertFalse(output.exists())
 
+    def test_stray_stdout_output_cannot_corrupt_the_stream(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "input.txt"
+            source.write_text("A short sentence to speak.", encoding="utf-8")
+            script = str(Path(__file__).with_name("kokoro-speech.py"))
+            arguments = [
+                "--text-file", str(source), "--wav-file", str(Path(folder) / "unused.wav"),
+                "--format", "pcm-stream",
+            ]
+            # Writes to stdout once the adapter has loaded, as a noisy library would.
+            noisy = (
+                "import asyncio, os, runpy, sys\n"
+                "real = asyncio.run\n"
+                "def run(work):\n"
+                "    os.write(1, b'native noise\\n')\n"
+                "    print('python noise', flush=True)\n"
+                "    return real(work)\n"
+                "asyncio.run = run\n"
+                f"sys.argv = [{script!r}] + {arguments!r}\n"
+                f"runpy.run_path({script!r}, run_name='__main__')\n"
+            )
+            result = subprocess.run([sys.executable, "-c", noisy], capture_output=True, timeout=180)
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            self.assertIn(b"native noise", result.stderr)
+            self.assertIn(b"python noise", result.stderr)
+            stream, offset, size = result.stdout, 0, None
+            while offset < len(stream):
+                size, = struct.unpack_from("<I", stream, offset)
+                offset += 4 + size
+                self.assertEqual(size % 2, 0)
+                if size == 0:
+                    break
+            self.assertEqual(size, 0, "Missing successful end marker")
+            self.assertEqual(offset, len(stream))
+
     def test_blend_generates_audio_and_validates_ratios(self):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "input.txt"

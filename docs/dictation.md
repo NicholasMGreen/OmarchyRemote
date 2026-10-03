@@ -183,7 +183,9 @@ For custom streaming adapters, `pcm-stream` writes only binary audio frames to s
 a four-byte unsigned little-endian payload length followed by mono 24 kHz signed
 16-bit little-endian PCM. Frames must have an even length, at most 2 MiB each and
 32 MiB total. A zero-length frame followed by EOF and successful process exit marks
-completion. Diagnostics belong on stderr. In this mode `{audio}` is unused; in `wav`
+completion. Diagnostics belong on stderr; any stray stdout write corrupts the stream, so
+an adapter that loads libraries should keep a copy of stdout for frames and point the
+original at stderr, as `kokoro-speech.py` does. In this mode `{audio}` is unused; in `wav`
 mode the adapter must write the complete file there. Requests still have a three-minute
 generation deadline and only one generation runs at a time.
 

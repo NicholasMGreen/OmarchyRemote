@@ -3,9 +3,9 @@
 
 import argparse
 import asyncio
+import os
 from pathlib import Path
 import struct
-import sys
 
 
 async def stream_audio(kokoro, text, voice, speed, language, output):
@@ -56,6 +56,10 @@ def main():
         text = source.read(65537)
     if not text.strip() or len(text) > 65536:
         parser.error("text must be nonempty and at most 64 KiB")
+    # Audio frames keep the real stdout. Everything else written there, including by
+    # native libraries, goes to stderr so it cannot corrupt the stream.
+    frames = os.fdopen(os.dup(1), "wb")
+    os.dup2(2, 1)
 
     import onnxruntime as ort
     import soundfile as sf
@@ -81,7 +85,7 @@ def main():
         voice = first * args.blend_ratio + second * (1.0 - args.blend_ratio)
     if args.format == "pcm-stream":
         asyncio.run(stream_audio(
-            kokoro, text.decode("utf-8"), voice, args.speed, args.language, sys.stdout.buffer
+            kokoro, text.decode("utf-8"), voice, args.speed, args.language, frames
         ))
         return
     samples, rate = kokoro.create(
