@@ -173,7 +173,11 @@ test('tapping the message box types and tapping the conversation hides the keybo
   await expect(app.locator('.chat-tool')).toBeVisible();
   const composer = app.locator('textarea.native-input');
   await expect(composer).toBeHidden();
+  const font = locator => locator.evaluate(e => getComputedStyle(e).font);
+  const standIn = await font(app.locator('.chat-prompt'));
   await app.getByRole('button', { name: 'Write a message' }).click();
+  // The message box looks the same with the keyboard up or down.
+  expect(await font(composer)).toBe(standIn);
   await expect(composer).toBeFocused();
   // The composer has no header row: no keyboard-dismiss or typing-mode button.
   await expect(app.getByRole('button', { name: 'Hide keyboard' })).toBeHidden();

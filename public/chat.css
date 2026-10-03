@@ -329,6 +329,13 @@
 .chat-prompt-row {
   padding: 10px 2px 2px;
 }
+/* The stand-in shown while the keyboard is down matches the composer's text. */
+.chat-prompt {
+  font:
+    14px/22px 'JetBrains Mono',
+    ui-monospace,
+    monospace;
+}
 .chat-placeholder {
   color: var(--theme-secondary);
 }
