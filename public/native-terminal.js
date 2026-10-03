@@ -240,6 +240,9 @@
       this.schedule(true);
     }
     anchor() {
+      // A snapshot may have finished parsing before its next animation frame. Its
+      // pending anchor refers to that buffer; the DOM still describes the old one.
+      if (this.savedAnchor) return { ...this.savedAnchor };
       const visual = Math.floor(this.scroller.scrollTop / this.height),
         entry = this.layout[visual];
       return {

@@ -64,6 +64,48 @@
       buffer.getLine(i)?.translateToString(true)
     );
   }
+  // Align snapshots using surrounding content, not just a prefix of the visible row.
+  // Agents repeat tool output and redraw live summaries; the older copy must not win
+  // merely because it still contains one line that has changed in the current reply.
+  function historyPosition(before, after, source) {
+    const positions = lines => {
+      const map = new Map();
+      lines.forEach((line, i) => {
+        if (!/[\p{L}\p{N}]/u.test(line || '')) return;
+        if (!map.has(line)) map.set(line, []);
+        map.get(line).push(i);
+      });
+      return map;
+    };
+    const oldPositions = positions(before),
+      newPositions = positions(after),
+      scores = new Map(),
+      expected = after.length - before.length;
+    for (const [line, oldRows] of oldPositions) {
+      const newRows = newPositions.get(line);
+      // Frequently repeated status rows provide little evidence and can make the
+      // comparison quadratic. Blank rows and rules were already excluded above.
+      if (!newRows || oldRows.length > 16 || newRows.length > 16) continue;
+      for (const oldRow of oldRows) {
+        const weight = 1 / ((1 + Math.abs(oldRow - source) / 24) * oldRows.length * newRows.length);
+        for (const newRow of newRows) {
+          const offset = newRow - oldRow;
+          scores.set(offset, (scores.get(offset) || 0) + weight);
+        }
+      }
+    }
+    let offset = expected,
+      best = 0;
+    for (const [candidate, score] of scores)
+      if (
+        score > best ||
+        (score === best && Math.abs(candidate - expected) < Math.abs(offset - expected))
+      ) {
+        offset = candidate;
+        best = score;
+      }
+    return Math.max(0, Math.min(after.length - 1, source + offset));
+  }
   function suggestionColumn(term) {
     const b = term.buffer.active;
     const line = b.getLine(b.baseY + b.cursorY);
@@ -1465,9 +1507,7 @@
       if (!dimensions) return;
       const viewAnchor = this.term.nativeView.anchor(),
         scroll = viewAnchor.source;
-      // A run of lines from the top of the view: one line alone is often blank or a rule.
       const before = bufferLines(this.term);
-      const anchor = before.slice(scroll, scroll + 24);
       const pane = this.selected;
       this.rendering = true;
       // The native view keeps showing the previous snapshot until this one is fully written.
@@ -1486,21 +1526,7 @@
           if (this.followOutput || !previous) this.term.scrollToBottom();
           else {
             const after = bufferLines(this.term);
-            // History loaded above the view pushes its lines down by as many as were added.
-            const expected = Math.min(after.length - 1, scroll + after.length - before.length);
-            let target = Math.max(0, expected),
-              best = 0,
-              distance = Infinity;
-            for (let i = 0; i < after.length; i++) {
-              let run = 0;
-              while (run < anchor.length && after[i + run] === anchor[run]) run++;
-              const d = Math.abs(i - expected);
-              if (run > best || (run && run === best && d < distance)) {
-                target = i;
-                best = run;
-                distance = d;
-              }
-            }
+            const target = historyPosition(before, after, scroll);
             this.term.scrollToLine(target);
             this.term.nativeView.restore({ ...viewAnchor, follow: false }, target);
           }
