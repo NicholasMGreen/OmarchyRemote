@@ -22,6 +22,7 @@ async function setup(page, extra = []) {
         id: ID,
         title: 'Dinner ideas',
         entries: [entry('user', 'Ideas for dinner?'), entry('assistant', '**Pasta** is quick.')],
+        folder: '/home/qa/Chats/2026-10-03-dinner-ideas-1b8ab544',
         busy: false,
         partial: '',
         seq: 0,
@@ -120,6 +121,8 @@ test('a new chat streams its reply, shows tools, and can be stopped', async ({ p
   const { app, state, emit } = await setup(page);
   await app.getByRole('button', { name: 'New chat' }).click();
   await expect(app.locator('.chat-empty')).toContainText('Ask anything');
+  // A chat has no folder until its first message is sent.
+  await expect(app.getByRole('button', { name: 'Open chat folder' })).toBeHidden();
   const field = app.locator('textarea.native-input');
   await field.fill('What is a pelican?');
   await field.press('Enter');
@@ -344,4 +347,11 @@ test('model and effort are chosen per chat and remembered for new chats', async 
   await expect
     .poll(() => state.sent.at(-1))
     .toEqual({ id: ID, text: 'Again', model: 'fable', effort: 'low' });
+});
+
+test("a chat's folder opens in Files", async ({ page }) => {
+  const { app } = await setup(page);
+  await app.locator('.chat-row').click();
+  await app.getByRole('button', { name: 'Open chat folder' }).click();
+  await expect(page.locator('#remote-files-app')).toBeVisible();
 });

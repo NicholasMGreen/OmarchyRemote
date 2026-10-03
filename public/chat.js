@@ -32,6 +32,7 @@
     compose: 'M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z',
     back: 'm15 18-6-6 6-6',
     stop: 'M6 6h12v12H6Z',
+    folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z',
     tool: 'M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.4-.6-.6-2.4Z',
   };
   function icon(name) {
@@ -117,12 +118,20 @@
       this.stopButton = iconButton('stop', 'Stop', () => this.stop(), 'chat-stop');
       this.stopButton.hidden = true;
       this.threadNew = iconButton('compose', 'New chat', () => this.startNew(), 'chat-new');
+      // Each chat is a folder; files Claude makes for it land there.
+      this.folderButton = iconButton(
+        'folder',
+        'Open chat folder',
+        () => this.openFolder(),
+        'chat-folder-button'
+      );
       this.settingsButton = button('', () => this.toggleSettings(), 'chat-settings');
       this.settingsButton.setAttribute('aria-expanded', 'false');
       threadBar.append(
         this.backButton,
         this.title,
         this.settingsButton,
+        this.folderButton,
         this.stopButton,
         this.threadNew
       );
@@ -504,6 +513,10 @@
         )
       );
     }
+    openFolder() {
+      const files = HyprlandApps.get('files')?.provider;
+      if (this.chat?.folder && files?.openAt) files.openAt(this.bridge, this.chat.folder);
+    }
     async stop() {
       if (!this.chat?.id) return;
       this.stopButton.disabled = true;
@@ -555,6 +568,7 @@
     renderState() {
       const chat = this.chat;
       this.stopButton.hidden = !chat?.busy || !chat.id;
+      this.folderButton.hidden = !chat?.folder || !HyprlandApps.get('files')?.provider?.openAt;
       this.status.classList.toggle('error', !!chat?.error);
       this.status.classList.toggle('thinking', !chat?.error && !!chat?.busy && !chat.partial);
       this.status.textContent = chat?.error

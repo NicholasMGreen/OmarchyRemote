@@ -1,6 +1,7 @@
-//! Chat: conversations with a local Claude Code agent, outside any project. Each conversation is
-//! a Markdown file in `~/Chats/conversations`, the app's own record (readable, and easy to back up
-//! with git), and the agent runs in `~/Chats`. Claude's session log is only used to resume.
+//! Chat: conversations with a local Claude Code agent, outside any project. Each conversation is a
+//! folder in `~/Chats` holding `chat.md`, the app's own readable record (easy to back up with git),
+//! and the agent runs in that folder, so files it makes stay with the conversation and the folder
+//! can later become a project. Claude's session log is only used to resume.
 use crate::{ApiError, App, apps, error};
 use axum::{
     Json,
@@ -391,27 +392,59 @@ fn root() -> anyhow::Result<PathBuf> {
     );
     Ok(root)
 }
-fn folder(root: &FsPath) -> anyhow::Result<PathBuf> {
-    let folder = root.join("conversations");
+/// A chat folder's conversation file.
+const FILE: &str = "chat.md";
+/// Creates `~/Chats` privately and converts chats saved before conversations had folders.
+fn prepare(root: &FsPath) -> anyhow::Result<()> {
+    private_dir(root)?;
+    if let Ok(config) = claude_config() {
+        migrate(&config, root);
+    }
+    Ok(())
+}
+fn private_dir(path: &FsPath) -> anyhow::Result<()> {
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
-        .create(&folder)?;
-    Ok(folder)
+        .create(path)?;
+    Ok(())
 }
-fn find(folder: &FsPath, id: &str) -> anyhow::Result<PathBuf> {
-    anyhow::ensure!(uuid::Uuid::parse_str(id).is_ok(), "Invalid chat");
-    let suffix = format!("-{}.md", &id[..8]);
-    for entry in fs::read_dir(folder)?.flatten() {
-        let path = entry.path();
-        if path.to_string_lossy().ends_with(&suffix)
-            && head(&path)
-                .is_some_and(|(fields, _)| fields.get("id").map(String::as_str) == Some(id))
-        {
-            return Ok(path);
-        }
+/// A new folder named `name` inside `parent`, numbered if the name is taken.
+fn new_dir(parent: &FsPath, name: &str) -> anyhow::Result<PathBuf> {
+    private_dir(parent)?;
+    let mut dir = parent.join(name);
+    let mut copy = 2;
+    while fs::symlink_metadata(&dir).is_ok() {
+        dir = parent.join(format!("{name}-{copy}"));
+        copy += 1;
     }
-    anyhow::bail!("Chat not found")
+    fs::DirBuilder::new().mode(0o700).create(&dir)?;
+    Ok(dir)
+}
+/// The chat folders directly inside `parent` (never `archives`), with their conversation files.
+fn chat_files(parent: &FsPath) -> Vec<PathBuf> {
+    fs::read_dir(parent)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && e.file_name() != "archives")
+        .map(|e| e.path().join(FILE))
+        .filter(|path| path.is_file())
+        .collect()
+}
+fn find(root: &FsPath, id: &str) -> anyhow::Result<PathBuf> {
+    anyhow::ensure!(uuid::Uuid::parse_str(id).is_ok(), "Invalid chat");
+    let suffix = format!("-{}", &id[..8]);
+    chat_files(root)
+        .into_iter()
+        .find(|path| {
+            path.parent()
+                .and_then(FsPath::file_name)
+                .is_some_and(|name| name.to_string_lossy().contains(&suffix))
+                && head(path)
+                    .is_some_and(|(fields, _)| fields.get("id").map(String::as_str) == Some(id))
+        })
+        .ok_or_else(|| anyhow::anyhow!("Chat not found"))
 }
 /// The front matter of a conversation file, read without the rest of it.
 fn head(path: &FsPath) -> Option<(HashMap<String, String>, ())> {
@@ -443,19 +476,16 @@ fn save(conversation: &Conversation, path: &FsPath) -> anyhow::Result<()> {
     fs::rename(temporary, path)?;
     Ok(())
 }
-fn list(folder: &FsPath) -> Vec<Value> {
-    let mut chats: Vec<Value> = fs::read_dir(folder)
+fn list(root: &FsPath) -> Vec<Value> {
+    let mut chats: Vec<Value> = chat_files(root)
         .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
-        .filter_map(|e| head(&e.path()))
-        .filter(|(fields, _)| {
-            fields
-                .get("id")
-                .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+        .filter_map(|path| {
+            let (fields, _) = head(&path)?;
+            uuid::Uuid::parse_str(fields.get("id")?).ok()?;
+            let mut chat = json!(fields);
+            chat["folder"] = json!(path.parent()?.to_string_lossy());
+            Some(chat)
         })
-        .map(|(fields, _)| json!(fields))
         .collect();
     chats.sort_by(|a, b| b["updated"].as_str().cmp(&a["updated"].as_str()));
     chats
@@ -670,7 +700,7 @@ impl Chats {
         args.push(live.conversation.session.clone());
         let mut child = Command::new(apps::resolve_program("claude")?)
             .args(&args)
-            .current_dir(root)
+            .current_dir(live.path.parent().unwrap_or(root))
             .env_remove("CLAUDECODE")
             .env_remove("CLAUDE_CODE_ENTRYPOINT")
             .env_remove("CLAUDE_CODE_SESSION_ID")
@@ -792,9 +822,9 @@ impl Chats {
 
 pub async fn status(State(app): State<App>) -> Result<Json<Value>, ApiError> {
     let root = root().map_err(error)?;
-    let folder = folder(&root).map_err(error)?;
+    prepare(&root).map_err(error)?;
     let running = app.chats.running.lock().unwrap();
-    let chats: Vec<Value> = list(&folder)
+    let chats: Vec<Value> = list(&root)
         .into_iter()
         .map(|mut chat| {
             let id = chat["id"].as_str().unwrap_or_default();
@@ -820,15 +850,18 @@ pub async fn read(State(app): State<App>, Path(id): Path<String>) -> Result<Json
         let live = running.live.lock().unwrap();
         let mut value = live.conversation.json();
         value["busy"] = json!(live.busy);
+        value["folder"] = json!(live.path.parent().map(|d| d.to_string_lossy()));
         value["partial"] = json!(live.partial);
         value["seq"] = json!(live.seq);
         value["n"] = json!(app.chats.counter.load(Ordering::SeqCst));
         return Ok(Json(value));
     }
-    let folder = folder(&root().map_err(error)?).map_err(error)?;
-    let path = find(&folder, &id)
+    let root = root().map_err(error)?;
+    prepare(&root).map_err(error)?;
+    let path = find(&root, &id)
         .map_err(|e| (StatusCode::NOT_FOUND, Json(json!({"error":e.to_string()}))))?;
     let mut value = load(&path).map_err(error)?.json();
+    value["folder"] = json!(path.parent().map(|d| d.to_string_lossy()));
     value["busy"] = json!(false);
     value["partial"] = json!("");
     value["seq"] = json!(0);
@@ -868,7 +901,7 @@ pub async fn send(
     }
     let chats = app.chats.clone();
     let root = root().map_err(error)?;
-    let folder = folder(&root).map_err(error)?;
+    prepare(&root).map_err(error)?;
     // New settings take effect by starting the agent again; never in the middle of a reply.
     let mut restarted = None;
     if let Some(running) = request.id.as_deref().and_then(|id| chats.get(id)) {
@@ -900,7 +933,7 @@ pub async fn send(
             let (mut conversation, path, resume) = match (&request.id, restarted) {
                 (Some(_), Some((conversation, path))) => (conversation, path, true),
                 (Some(id), None) => {
-                    let path = find(&folder, id).map_err(|e| {
+                    let path = find(&root, id).map_err(|e| {
                         (StatusCode::NOT_FOUND, Json(json!({"error":e.to_string()})))
                     })?;
                     (load(&path).map_err(error)?, path, true)
@@ -909,12 +942,8 @@ pub async fn send(
                     let id = uuid::Uuid::new_v4().to_string();
                     let title = title(&text);
                     let created = now();
-                    let path = folder.join(format!(
-                        "{}-{}-{}.md",
-                        &created[..10],
-                        slug(&title),
-                        &id[..8]
-                    ));
+                    let name = format!("{}-{}-{}", &created[..10], slug(&title), &id[..8]);
+                    let path = new_dir(&root, &name).map_err(error)?.join(FILE);
                     let conversation = Conversation {
                         session: id.clone(),
                         id,
@@ -987,22 +1016,86 @@ pub async fn stop(State(app): State<App>, Path(id): Path<String>) -> Json<Value>
     Json(json!({"stopped":true}))
 }
 
-/// Claude's own copy of a conversation: its session log and the session's other files.
-fn claude_files(config: &FsPath, root: &FsPath, session: &str) -> anyhow::Result<Vec<PathBuf>> {
-    anyhow::ensure!(uuid::Uuid::parse_str(session).is_ok(), "Invalid session");
-    // Claude names a project's folder after its path, with every other character a dash.
-    let project: String = root
+/// Claude files a session's log under a folder named after the working directory's path, with
+/// every other character a dash.
+fn claude_project(config: &FsPath, cwd: &FsPath) -> PathBuf {
+    let project: String = cwd
         .to_string_lossy()
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    let projects = config.join("projects").join(project);
+    config.join("projects").join(project)
+}
+/// Claude's own copy of a conversation: its session log and the session's other files.
+fn claude_files(config: &FsPath, cwd: &FsPath, session: &str) -> anyhow::Result<Vec<PathBuf>> {
+    anyhow::ensure!(uuid::Uuid::parse_str(session).is_ok(), "Invalid session");
+    let project = claude_project(config, cwd);
     Ok(vec![
-        projects.join(format!("{session}.jsonl")),
-        projects.join(session),
+        project.join(format!("{session}.jsonl")),
+        project.join(session),
         config.join("file-history").join(session),
         config.join("session-env").join(session),
     ])
+}
+/// Moves a session's log to the project folder of a chat's new location, so `claude --resume`
+/// run there lists it. Claude also finds a session by id from anywhere, so a failure is harmless.
+fn move_session(config: &FsPath, from: &FsPath, to: &FsPath, session: &str) {
+    if uuid::Uuid::parse_str(session).is_err() {
+        return;
+    }
+    let (old, new) = (claude_project(config, from), claude_project(config, to));
+    for name in [format!("{session}.jsonl"), session.to_owned()] {
+        let source = old.join(&name);
+        if fs::symlink_metadata(&source).is_ok()
+            && fs::create_dir_all(&new).is_ok()
+            && let Err(e) = fs::rename(&source, new.join(&name))
+        {
+            eprintln!("chat: could not move {}: {e}", source.display());
+        }
+    }
+}
+/// Converts chats saved as single files (in `conversations` and `archives`) into folders.
+fn migrate(config: &FsPath, root: &FsPath) {
+    for (files, parent) in [
+        (root.join("conversations"), root.to_owned()),
+        (root.join("archives"), root.join("archives")),
+    ] {
+        let Ok(entries) = fs::read_dir(&files) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !entry.file_type().is_ok_and(|t| t.is_file())
+                || path.extension().is_none_or(|x| x != "md")
+            {
+                continue;
+            }
+            let Some(conversation) = fs::read_to_string(&path)
+                .ok()
+                .and_then(|t| Conversation::parse(&t))
+            else {
+                continue;
+            };
+            let name = path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let moved = new_dir(&parent, &name).and_then(|dir| {
+                fs::rename(&path, dir.join(FILE))?;
+                Ok(dir)
+            });
+            match moved {
+                // Before folders, every chat's agent ran in the Chats folder itself.
+                Ok(dir) => move_session(config, root, &dir, &conversation.session),
+                Err(e) => eprintln!("chat: could not move {} into a folder: {e}", path.display()),
+            }
+        }
+        // Only an emptied `conversations` folder goes; `archives` holds the archived folders.
+        if files != parent {
+            let _ = fs::remove_dir(&files);
+        }
+    }
 }
 /// Removes a file or folder; a symlink is removed itself, never followed.
 fn remove(path: &FsPath) -> anyhow::Result<()> {
@@ -1014,43 +1107,54 @@ fn remove(path: &FsPath) -> anyhow::Result<()> {
     }
     Ok(())
 }
-/// Moves a conversation file to `archives`, keeping Claude's session so it can be resumed.
-fn archive_file(root: &FsPath, path: &FsPath) -> anyhow::Result<PathBuf> {
+/// The folder of a chat's conversation file, which must be a chat folder directly in `parent`.
+fn chat_dir(parent: &FsPath, path: &FsPath) -> anyhow::Result<PathBuf> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Chat file has no folder"))?;
+    anyhow::ensure!(
+        dir.parent() == Some(parent) && dir.file_name().is_some_and(|n| n != "archives"),
+        "Not a chat folder"
+    );
+    Ok(dir.to_owned())
+}
+/// Moves a chat's folder to `archives`, keeping Claude's session so it can be resumed.
+fn archive_dir(config: &FsPath, root: &FsPath, path: &FsPath) -> anyhow::Result<PathBuf> {
+    let dir = chat_dir(root, path)?;
+    let session = load(path)?.session;
     let archives = root.join("archives");
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&archives)?;
-    let name = path
-        .file_stem()
-        .ok_or_else(|| anyhow::anyhow!("Unnamed chat file"))?
+    private_dir(&archives)?;
+    let name = dir
+        .file_name()
+        .unwrap_or_default()
         .to_string_lossy()
         .into_owned();
-    let mut target = archives.join(format!("{name}.md"));
+    let mut target = archives.join(&name);
     let mut copy = 2;
     while fs::symlink_metadata(&target).is_ok() {
-        target = archives.join(format!("{name}-{copy}.md"));
+        target = archives.join(format!("{name}-{copy}"));
         copy += 1;
     }
-    fs::rename(path, &target)?;
+    fs::rename(&dir, &target)?;
+    move_session(config, &dir, &target, &session);
     Ok(target)
 }
-/// Deletes a conversation: its file and Claude's copy of it.
 fn claude_config() -> anyhow::Result<PathBuf> {
     Ok(match std::env::var_os("CLAUDE_CONFIG_DIR") {
         Some(dir) => PathBuf::from(dir),
         None => apps::home()?.join(".claude"),
     })
 }
-fn delete_file(config: &FsPath, root: &FsPath, path: &FsPath, id: &str) -> anyhow::Result<()> {
+/// Deletes a chat: its folder, including any files made in it, and Claude's copy of it.
+fn delete_dir(config: &FsPath, root: &FsPath, path: &FsPath, id: &str) -> anyhow::Result<()> {
+    let dir = chat_dir(root, path)?;
     let session = load(path)
         .map(|c| c.session)
         .unwrap_or_else(|_| id.to_owned());
-    for file in claude_files(config, root, &session)? {
+    for file in claude_files(config, &dir, &session)? {
         remove(&file)?;
     }
-    fs::remove_file(path)?;
-    Ok(())
+    remove(&dir)
 }
 
 #[derive(Deserialize)]
@@ -1077,10 +1181,10 @@ async fn manage(app: &App, ids: Vec<String>, delete: bool) -> Result<Json<Value>
         ));
     }
     let root = root().map_err(error)?;
-    let folder = folder(&root).map_err(error)?;
+    prepare(&root).map_err(error)?;
     let (mut done, mut failed) = (Vec::new(), Vec::new());
     for id in ids {
-        let path = match find(&folder, &id) {
+        let path = match find(&root, &id) {
             Ok(path) => path,
             Err(e) => {
                 failed.push(json!({"id":id,"error":e.to_string()}));
@@ -1089,9 +1193,9 @@ async fn manage(app: &App, ids: Vec<String>, delete: bool) -> Result<Json<Value>
         };
         app.chats.retire(&id).await;
         let result = if delete {
-            claude_config().and_then(|config| delete_file(&config, &root, &path, &id))
+            claude_config().and_then(|config| delete_dir(&config, &root, &path, &id))
         } else {
-            archive_file(&root, &path).map(|_| ())
+            claude_config().and_then(|config| archive_dir(&config, &root, &path).map(|_| ()))
         };
         match result {
             Ok(()) => done.push(id),
@@ -1294,83 +1398,157 @@ mod tests {
         assert_eq!(failed[0]["error"], "Out of usage");
     }
 
-    #[test]
-    fn archiving_moves_the_file_and_deleting_removes_claudes_copy() {
-        let dir = crate::dictation::AudioDir::new().unwrap();
-        let root = dir.0.join("Chats");
-        let folder = folder(&root).unwrap();
-        let conversation = sample();
-        let name = "2026-10-03-plan-dinner-ideas-1b8ab544.md";
-        let path = folder.join(name);
-        save(&conversation, &path).unwrap();
-        let archived = archive_file(&root, &path).unwrap();
-        assert_eq!(archived, root.join("archives").join(name));
-        assert!(!path.exists());
-        assert!(list(&folder).is_empty());
-        // A second chat with the same file name does not replace the first.
-        save(&conversation, &path).unwrap();
-        assert_eq!(
-            archive_file(&root, &path).unwrap(),
-            root.join("archives/2026-10-03-plan-dinner-ideas-1b8ab544-2.md")
-        );
-
-        let config = dir.0.join("claude");
-        let files = claude_files(&config, &root, &conversation.session).unwrap();
-        let project: String = root
-            .to_string_lossy()
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-            .collect();
-        assert_eq!(
-            files[0],
-            dir.0
-                .join("claude/projects")
-                .join(&project)
-                .join(format!("{}.jsonl", conversation.session))
-        );
-        fs::create_dir_all(files[0].parent().unwrap()).unwrap();
-        fs::write(&files[0], "log").unwrap();
-        fs::create_dir_all(files[2].join("nested")).unwrap();
-        // A symlink in Claude's folders is removed, not followed.
-        let outside = dir.0.join("outside");
-        fs::create_dir(&outside).unwrap();
-        fs::write(outside.join("keep"), "keep").unwrap();
-        fs::create_dir_all(files[3].parent().unwrap()).unwrap();
-        std::os::unix::fs::symlink(&outside, &files[3]).unwrap();
-        save(&conversation, &path).unwrap();
-        delete_file(&config, &root, &path, &conversation.id).unwrap();
-        assert!(!path.exists());
-        for file in &files {
-            assert!(fs::symlink_metadata(file).is_err(), "{}", file.display());
-        }
-        assert!(outside.join("keep").exists());
-        assert!(claude_files(&config, &root, "../escape").is_err());
+    fn project(config: &FsPath, cwd: &FsPath, session: &str) -> PathBuf {
+        claude_project(config, cwd).join(format!("{session}.jsonl"))
+    }
+    fn write(path: &FsPath, text: &str) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
     }
 
     #[test]
-    fn saving_is_private_and_listing_reads_headers() {
+    fn each_chat_is_a_private_folder_and_the_list_reads_their_headers() {
         use std::os::unix::fs::PermissionsExt;
         let dir = crate::dictation::AudioDir::new().unwrap();
-        let folder = folder(&dir.0).unwrap();
+        let root = dir.0.join("Chats");
+        prepare(&root).unwrap();
+        assert_eq!(
+            fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let conversation = sample();
+        let folder = new_dir(&root, "2026-10-03-plan-dinner-ideas-1b8ab544").unwrap();
         assert_eq!(
             fs::metadata(&folder).unwrap().permissions().mode() & 0o777,
             0o700
         );
-        let conversation = sample();
-        let path = folder.join("2026-10-03-plan-dinner-ideas-1b8ab544.md");
+        let path = folder.join(FILE);
         save(&conversation, &path).unwrap();
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        assert_eq!(find(&folder, &conversation.id).unwrap(), path);
-        assert!(find(&folder, "2c8ab544-8cc5-430e-8a40-0aec58bc3b10").is_err());
-        assert!(find(&folder, "../escape").is_err());
+        // A taken name gets a number rather than sharing a folder.
+        assert_eq!(
+            new_dir(&root, "2026-10-03-plan-dinner-ideas-1b8ab544").unwrap(),
+            root.join("2026-10-03-plan-dinner-ideas-1b8ab544-2")
+        );
+        assert_eq!(find(&root, &conversation.id).unwrap(), path);
+        assert!(find(&root, "2c8ab544-8cc5-430e-8a40-0aec58bc3b10").is_err());
+        assert!(find(&root, "../escape").is_err());
         assert_eq!(load(&path).unwrap(), conversation);
-        fs::write(folder.join("notes.md"), "# not a chat").unwrap();
-        let chats = list(&folder);
+        // Other folders, loose files, and archived chats are not listed.
+        write(&root.join("project/notes.md"), "# not a chat");
+        write(
+            &root.join("archives/old-1b8ab544/chat.md"),
+            &conversation.to_markdown(),
+        );
+        let chats = list(&root);
         assert_eq!(chats.len(), 1);
         assert_eq!(chats[0]["title"], "Plan \"dinner\": ideas");
+        assert_eq!(chats[0]["folder"], json!(folder.to_string_lossy()));
         assert_eq!(chats[0]["preview"], conversation.preview());
+    }
+
+    #[test]
+    fn archiving_moves_the_folder_with_its_files_and_session() {
+        let dir = crate::dictation::AudioDir::new().unwrap();
+        let (root, config) = (dir.0.join("Chats"), dir.0.join("claude"));
+        let conversation = sample();
+        let name = "2026-10-03-plan-dinner-ideas-1b8ab544";
+        let folder = new_dir(&root, name).unwrap();
+        save(&conversation, &folder.join(FILE)).unwrap();
+        write(&folder.join("notes/plan.txt"), "made by Claude");
+        write(&project(&config, &folder, &conversation.session), "log");
+        let archived = archive_dir(&config, &root, &folder.join(FILE)).unwrap();
+        assert_eq!(archived, root.join("archives").join(name));
+        assert!(!folder.exists());
+        assert!(archived.join("notes/plan.txt").exists());
+        assert!(list(&root).is_empty());
+        // Claude's log follows the folder, so `claude --resume` there lists it.
+        assert!(project(&config, &archived, &conversation.session).exists());
+        assert!(!project(&config, &folder, &conversation.session).exists());
+        // A second chat with the same name does not replace the first.
+        let again = new_dir(&root, name).unwrap();
+        save(&conversation, &again.join(FILE)).unwrap();
+        assert_eq!(
+            archive_dir(&config, &root, &again.join(FILE)).unwrap(),
+            root.join("archives").join(format!("{name}-2"))
+        );
+    }
+
+    #[test]
+    fn deleting_removes_the_folder_and_claudes_copy_and_nothing_else() {
+        let dir = crate::dictation::AudioDir::new().unwrap();
+        let (root, config) = (dir.0.join("Chats"), dir.0.join("claude"));
+        let conversation = sample();
+        let folder = new_dir(&root, "2026-10-03-plan-dinner-ideas-1b8ab544").unwrap();
+        let path = folder.join(FILE);
+        save(&conversation, &path).unwrap();
+        write(&folder.join("draft.txt"), "made by Claude");
+        let files = claude_files(&config, &folder, &conversation.session).unwrap();
+        assert_eq!(files[0], project(&config, &folder, &conversation.session));
+        write(&files[0], "log");
+        fs::create_dir_all(files[2].join("nested")).unwrap();
+        // A symlink in Claude's folders is removed, not followed.
+        let outside = dir.0.join("outside");
+        write(&outside.join("keep"), "keep");
+        fs::create_dir_all(files[3].parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&outside, &files[3]).unwrap();
+        delete_dir(&config, &root, &path, &conversation.id).unwrap();
+        assert!(!folder.exists());
+        for file in &files {
+            assert!(fs::symlink_metadata(file).is_err(), "{}", file.display());
+        }
+        assert!(outside.join("keep").exists());
+        assert!(root.exists());
+        // Only a chat folder directly in Chats can be deleted, never Chats itself or archives.
+        assert!(delete_dir(&config, &root, &root.join(FILE), &conversation.id).is_err());
+        assert!(
+            delete_dir(
+                &config,
+                &root,
+                &root.join("archives").join(FILE),
+                &conversation.id
+            )
+            .is_err()
+        );
+        assert!(delete_dir(&config, &root, &outside.join(FILE), &conversation.id).is_err());
+        assert!(claude_files(&config, &root, "../escape").is_err());
+    }
+
+    #[test]
+    fn chats_saved_as_files_become_folders_with_their_sessions() {
+        let dir = crate::dictation::AudioDir::new().unwrap();
+        let (root, config) = (dir.0.join("Chats"), dir.0.join("claude"));
+        let conversation = sample();
+        let mut archived = sample();
+        archived.id = "2c8ab544-8cc5-430e-8a40-0aec58bc3b10".into();
+        archived.session = archived.id.clone();
+        write(
+            &root.join("conversations/2026-10-03-plan-1b8ab544.md"),
+            &conversation.to_markdown(),
+        );
+        write(&root.join("conversations/notes.txt"), "not a chat");
+        write(
+            &root.join("archives/2026-10-02-old-2c8ab544.md"),
+            &archived.to_markdown(),
+        );
+        // Before folders, every chat's agent ran in the Chats folder itself.
+        write(&project(&config, &root, &conversation.session), "log");
+        write(&project(&config, &root, &archived.session), "log");
+        migrate(&config, &root);
+        let active = root.join("2026-10-03-plan-1b8ab544");
+        let old = root.join("archives/2026-10-02-old-2c8ab544");
+        assert_eq!(load(&active.join(FILE)).unwrap(), conversation);
+        assert_eq!(load(&old.join(FILE)).unwrap(), archived);
+        assert!(project(&config, &active, &conversation.session).exists());
+        assert!(project(&config, &old, &archived.session).exists());
+        // Anything that was not a chat stays where it was, so its folder stays too.
+        assert!(root.join("conversations/notes.txt").exists());
+        assert_eq!(find(&root, &conversation.id).unwrap(), active.join(FILE));
+        // Running it again changes nothing.
+        migrate(&config, &root);
+        assert_eq!(list(&root).len(), 1);
     }
 }
