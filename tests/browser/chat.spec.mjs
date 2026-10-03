@@ -4,7 +4,7 @@ const ID = '1b8ab544-8cc5-430e-8a40-0aec58bc3b10';
 const NEW = '2c8ab544-8cc5-430e-8a40-0aec58bc3b10';
 const entry = (role, text, name = '') => ({ role, text, name, time: '2026-10-03T10:00:00Z' });
 
-async function setup(page) {
+async function setup(page, extra = []) {
   await page.setViewportSize({ width: 402, height: 874 });
   const state = {
     chats: [
@@ -15,6 +15,7 @@ async function setup(page) {
         updated: new Date().toISOString(),
         busy: false,
       },
+      ...extra,
     ],
     conversations: {
       [ID]: {
@@ -62,6 +63,18 @@ async function setup(page) {
     state.stopped.push(r.request().url().split('/').at(-2));
     return r.fulfill({ json: { stopped: true } });
   });
+  state.managed = [];
+  for (const action of ['archive', 'delete'])
+    await page.route(`**/api/chat/${action}`, r => {
+      const { ids } = r.request().postDataJSON();
+      state.managed.push({ action, ids });
+      const failed = ids.filter(id => id === state.failId);
+      const done = ids.filter(id => id !== state.failId);
+      state.chats = state.chats.filter(c => !done.includes(c.id));
+      return r.fulfill({
+        json: { done, failed: failed.map(id => ({ id, error: 'Permission denied' })) },
+      });
+    });
   await page.routeWebSocket('**/api/chat/ws', ws => {
     state.ws = ws;
   });
@@ -202,4 +215,73 @@ test('an empty list invites a first chat', async ({ page }) => {
   await page.screenshot({ path: 'artifacts/browser/chat-empty.png' });
   await app.getByRole('button', { name: 'Start a chat' }).click();
   await expect(app.locator('.chat-empty')).toContainText('Ask anything');
+});
+
+const more = [
+  {
+    id: '3c8ab544-8cc5-430e-8a40-0aec58bc3b10',
+    title: 'Trip plan',
+    preview: 'Day one',
+    updated: new Date().toISOString(),
+  },
+  {
+    id: '4d8ab544-8cc5-430e-8a40-0aec58bc3b10',
+    title: 'Old notes',
+    preview: 'Notes',
+    updated: new Date().toISOString(),
+  },
+];
+
+test('several chats can be selected and archived', async ({ page }) => {
+  const { app, state } = await setup(page, more);
+  await expect(app.locator('.chat-row')).toHaveCount(3);
+  await app.getByRole('button', { name: 'Select' }).click();
+  await expect(app.locator('.chat-heading')).toHaveText('0 selected');
+  await expect(app.getByRole('button', { name: 'Archive' })).toBeDisabled();
+  await expect(app.getByRole('button', { name: 'New chat' })).toBeHidden();
+  await app.getByRole('checkbox', { name: /Dinner ideas/ }).click();
+  await app.getByRole('checkbox', { name: /Old notes/ }).click();
+  await expect(app.locator('.chat-heading')).toHaveText('2 selected');
+  await expect(app.getByRole('checkbox', { name: /Dinner ideas/ })).toHaveAttribute(
+    'aria-checked',
+    'true'
+  );
+  await page.screenshot({ path: 'artifacts/browser/chat-select.png' });
+  // A tap on a selected row unselects it rather than opening the chat.
+  await app.getByRole('checkbox', { name: /Old notes/ }).click();
+  await expect(app.locator('.chat-heading')).toHaveText('1 selected');
+  await app.getByRole('checkbox', { name: /Old notes/ }).click();
+  await app.getByRole('button', { name: 'Archive' }).click();
+  await expect.poll(() => state.managed).toEqual([{ action: 'archive', ids: [ID, more[1].id] }]);
+  await expect(app.locator('.chat-row')).toHaveCount(1);
+  await expect(app.locator('.chat-heading')).toHaveText('Chats');
+  await expect(app.locator('.chat-row-title')).toHaveText('Trip plan');
+});
+
+test('deleting asks first, and a chat that fails stays with the reason', async ({ page }) => {
+  const { app, state } = await setup(page, more);
+  state.failId = more[0].id;
+  await app.getByRole('button', { name: 'Select' }).click();
+  await app.getByRole('checkbox', { name: /Dinner ideas/ }).click();
+  await app.getByRole('checkbox', { name: /Trip plan/ }).click();
+  await app.getByRole('button', { name: 'Delete', exact: true }).click();
+  await expect(app.locator('.chat-actions-text')).toHaveText('Delete 2 chats permanently?');
+  await page.screenshot({ path: 'artifacts/browser/chat-delete-confirm.png' });
+  // Keep backs out without deleting anything.
+  await app.getByRole('button', { name: 'Keep' }).click();
+  await expect(app.getByRole('button', { name: 'Archive' })).toBeVisible();
+  expect(state.managed).toEqual([]);
+  await app.getByRole('button', { name: 'Delete', exact: true }).click();
+  await app.getByRole('button', { name: 'Delete permanently' }).click();
+  await expect.poll(() => state.managed).toEqual([{ action: 'delete', ids: [ID, more[0].id] }]);
+  await expect(app.locator('.chat-folder')).toHaveText('Could not delete 1: Permission denied');
+  await expect(app.locator('.chat-row-title')).toHaveText(['Trip plan', 'Old notes']);
+});
+
+test('a chat removed elsewhere closes if it is open', async ({ page }) => {
+  const { app, emit } = await setup(page);
+  await app.locator('.chat-row').click();
+  await expect(app.locator('.chat-title')).toHaveText('Dinner ideas');
+  emit({ type: 'removed', ids: [ID] });
+  await expect(app.locator('.chat-heading')).toHaveText('Chats');
 });

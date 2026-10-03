@@ -573,6 +573,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/terminal/{id}/close", post(terminal_close))
         .route("/api/chat", get(chat::status))
         .route("/api/chat/send", post(chat::send))
+        .route("/api/chat/archive", post(chat::archive))
+        .route("/api/chat/delete", post(chat::delete))
         .route("/api/chat/ws", get(chat::upgrade))
         .route("/api/chat/{id}", get(chat::read))
         .route("/api/chat/{id}/stop", post(chat::stop))

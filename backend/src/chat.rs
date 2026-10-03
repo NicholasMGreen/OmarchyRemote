@@ -390,6 +390,8 @@ struct Live {
     used: Instant,
     /// Stop was requested, so the agent's exit ends the turn without an error.
     stopping: bool,
+    /// Archived or deleted: nothing the agent does afterwards is saved.
+    removed: bool,
 }
 impl Live {
     /// Applies one line of Claude's stream-json output; returns the events to broadcast.
@@ -609,6 +611,7 @@ impl Chats {
                     let mut events = live.apply(&value);
                     chats.stamp(&mut events);
                     if events.iter().any(|e| e["type"] != "delta")
+                        && !live.removed
                         && let Err(e) = save(&live.conversation, &live.path)
                     {
                         eprintln!("chat: could not save {}: {e}", live.path.display());
@@ -622,6 +625,14 @@ impl Chats {
             chats.finish(&id, &reader, &last);
         });
         Ok(running)
+    }
+    /// Stops a conversation's agent for good, before its file is archived or deleted.
+    async fn retire(&self, id: &str) {
+        let running = self.running.lock().unwrap().remove(id);
+        if let Some(running) = running {
+            running.live.lock().unwrap().removed = true;
+            let _ = running.child.lock().await.start_kill();
+        }
     }
     /// The agent exited: keep any streamed text, and end a turn it left unfinished.
     fn finish(&self, id: &str, running: &Arc<Running>, stderr: &str) {
@@ -638,7 +649,9 @@ impl Chats {
             events.push(json!({"type":"entry","id":id,"index":live.conversation.entries.len(),"entry":entry.json()}));
             live.conversation.entries.push(entry);
             live.partial.clear();
-            let _ = save(&live.conversation, &live.path);
+            if !live.removed {
+                let _ = save(&live.conversation, &live.path);
+            }
         }
         if live.busy {
             live.busy = false;
@@ -763,6 +776,7 @@ pub async fn send(
                 message: String::new(),
                 used: Instant::now(),
                 stopping: false,
+                removed: false,
             };
             chats.spawn(live, resume, &root).map_err(error)?
         }
@@ -802,6 +816,123 @@ pub async fn stop(State(app): State<App>, Path(id): Path<String>) -> Json<Value>
         let _ = running.child.lock().await.start_kill();
     }
     Json(json!({"stopped":true}))
+}
+
+/// Claude's own copy of a conversation: its session log and the session's other files.
+fn claude_files(config: &FsPath, root: &FsPath, session: &str) -> anyhow::Result<Vec<PathBuf>> {
+    anyhow::ensure!(uuid::Uuid::parse_str(session).is_ok(), "Invalid session");
+    // Claude names a project's folder after its path, with every other character a dash.
+    let project: String = root
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let projects = config.join("projects").join(project);
+    Ok(vec![
+        projects.join(format!("{session}.jsonl")),
+        projects.join(session),
+        config.join("file-history").join(session),
+        config.join("session-env").join(session),
+    ])
+}
+/// Removes a file or folder; a symlink is removed itself, never followed.
+fn remove(path: &FsPath) -> anyhow::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => fs::remove_dir_all(path)?,
+        Ok(_) => fs::remove_file(path)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
+}
+/// Moves a conversation file to `archives`, keeping Claude's session so it can be resumed.
+fn archive_file(root: &FsPath, path: &FsPath) -> anyhow::Result<PathBuf> {
+    let archives = root.join("archives");
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&archives)?;
+    let name = path
+        .file_stem()
+        .ok_or_else(|| anyhow::anyhow!("Unnamed chat file"))?
+        .to_string_lossy()
+        .into_owned();
+    let mut target = archives.join(format!("{name}.md"));
+    let mut copy = 2;
+    while fs::symlink_metadata(&target).is_ok() {
+        target = archives.join(format!("{name}-{copy}.md"));
+        copy += 1;
+    }
+    fs::rename(path, &target)?;
+    Ok(target)
+}
+/// Deletes a conversation: its file and Claude's copy of it.
+fn claude_config() -> anyhow::Result<PathBuf> {
+    Ok(match std::env::var_os("CLAUDE_CONFIG_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => apps::home()?.join(".claude"),
+    })
+}
+fn delete_file(config: &FsPath, root: &FsPath, path: &FsPath, id: &str) -> anyhow::Result<()> {
+    let session = load(path)
+        .map(|c| c.session)
+        .unwrap_or_else(|_| id.to_owned());
+    for file in claude_files(config, root, &session)? {
+        remove(&file)?;
+    }
+    fs::remove_file(path)?;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct Batch {
+    ids: Vec<String>,
+}
+pub async fn archive(
+    State(app): State<App>,
+    Json(batch): Json<Batch>,
+) -> Result<Json<Value>, ApiError> {
+    manage(&app, batch.ids, false).await
+}
+pub async fn delete(
+    State(app): State<App>,
+    Json(batch): Json<Batch>,
+) -> Result<Json<Value>, ApiError> {
+    manage(&app, batch.ids, true).await
+}
+async fn manage(app: &App, ids: Vec<String>, delete: bool) -> Result<Json<Value>, ApiError> {
+    if ids.is_empty() || ids.len() > 1000 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"Choose between 1 and 1000 chats"})),
+        ));
+    }
+    let root = root().map_err(error)?;
+    let folder = folder(&root).map_err(error)?;
+    let (mut done, mut failed) = (Vec::new(), Vec::new());
+    for id in ids {
+        let path = match find(&folder, &id) {
+            Ok(path) => path,
+            Err(e) => {
+                failed.push(json!({"id":id,"error":e.to_string()}));
+                continue;
+            }
+        };
+        app.chats.retire(&id).await;
+        let result = if delete {
+            claude_config().and_then(|config| delete_file(&config, &root, &path, &id))
+        } else {
+            archive_file(&root, &path).map(|_| ())
+        };
+        match result {
+            Ok(()) => done.push(id),
+            Err(e) => failed.push(json!({"id":id,"error":e.to_string()})),
+        }
+    }
+    let mut events = vec![json!({"type":"removed","ids":done})];
+    app.chats.stamp(&mut events);
+    app.chats.emit(events);
+    Ok(Json(json!({"done":done,"failed":failed})))
 }
 
 pub async fn upgrade(State(app): State<App>, ws: WebSocketUpgrade) -> Response {
@@ -912,6 +1043,7 @@ mod tests {
             message: String::new(),
             used: Instant::now(),
             stopping: false,
+            removed: false,
         };
         let delta = |text: &str| json!({"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":text}}});
         assert_eq!(live.apply(&delta("Hel"))[0]["seq"], 1);
@@ -963,6 +1095,59 @@ mod tests {
         live.busy = true;
         let failed = live.apply(&json!({"type":"result","subtype":"error_during_execution","is_error":true,"errors":["Out of usage"]}));
         assert_eq!(failed[0]["error"], "Out of usage");
+    }
+
+    #[test]
+    fn archiving_moves_the_file_and_deleting_removes_claudes_copy() {
+        let dir = crate::dictation::AudioDir::new().unwrap();
+        let root = dir.0.join("Chats");
+        let folder = folder(&root).unwrap();
+        let conversation = sample();
+        let name = "2026-10-03-plan-dinner-ideas-1b8ab544.md";
+        let path = folder.join(name);
+        save(&conversation, &path).unwrap();
+        let archived = archive_file(&root, &path).unwrap();
+        assert_eq!(archived, root.join("archives").join(name));
+        assert!(!path.exists());
+        assert!(list(&folder).is_empty());
+        // A second chat with the same file name does not replace the first.
+        save(&conversation, &path).unwrap();
+        assert_eq!(
+            archive_file(&root, &path).unwrap(),
+            root.join("archives/2026-10-03-plan-dinner-ideas-1b8ab544-2.md")
+        );
+
+        let config = dir.0.join("claude");
+        let files = claude_files(&config, &root, &conversation.session).unwrap();
+        let project: String = root
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        assert_eq!(
+            files[0],
+            dir.0
+                .join("claude/projects")
+                .join(&project)
+                .join(format!("{}.jsonl", conversation.session))
+        );
+        fs::create_dir_all(files[0].parent().unwrap()).unwrap();
+        fs::write(&files[0], "log").unwrap();
+        fs::create_dir_all(files[2].join("nested")).unwrap();
+        // A symlink in Claude's folders is removed, not followed.
+        let outside = dir.0.join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("keep"), "keep").unwrap();
+        fs::create_dir_all(files[3].parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&outside, &files[3]).unwrap();
+        save(&conversation, &path).unwrap();
+        delete_file(&config, &root, &path, &conversation.id).unwrap();
+        assert!(!path.exists());
+        for file in &files {
+            assert!(fs::symlink_metadata(file).is_err(), "{}", file.display());
+        }
+        assert!(outside.join("keep").exists());
+        assert!(claude_files(&config, &root, "../escape").is_err());
     }
 
     #[test]

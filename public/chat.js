@@ -67,9 +67,33 @@
 
       this.listView = node('section', 'chat-list-view');
       const listBar = node('div', 'chat-bar');
-      listBar.append(node('h2', 'chat-heading', 'Chats'));
+      this.heading = node('h2', 'chat-heading', 'Chats');
+      this.selectButton = button('Select', () => this.select(true), 'chat-text-button');
+      this.cancelSelect = button('Cancel', () => this.select(false), 'chat-text-button');
+      this.cancelSelect.hidden = true;
       this.newButton = iconButton('compose', 'New chat', () => this.startNew(), 'chat-new');
-      listBar.append(this.newButton);
+      listBar.append(this.heading, this.selectButton, this.cancelSelect, this.newButton);
+      // Selecting several chats offers Archive and Delete; Delete asks to confirm first.
+      this.selected = new Set();
+      this.actions = node('div', 'chat-actions');
+      this.actions.hidden = true;
+      this.actionText = node('span', 'chat-actions-text');
+      this.archiveButton = button('Archive', () => this.archive(), 'remote-button');
+      this.deleteButton = button(
+        'Delete',
+        () => this.confirmDelete(true),
+        'remote-button chat-danger'
+      );
+      this.keepButton = button('Keep', () => this.confirmDelete(false), 'remote-button');
+      this.confirmButton = button('Delete', () => this.remove(), 'remote-button chat-danger');
+      this.confirmButton.setAttribute('aria-label', 'Delete permanently');
+      this.actions.append(
+        this.actionText,
+        this.archiveButton,
+        this.deleteButton,
+        this.keepButton,
+        this.confirmButton
+      );
       this.list = node('div', 'chat-list');
       this.list.setAttribute('role', 'list');
       this.empty = node('div', 'chat-list-empty');
@@ -81,7 +105,7 @@
       );
       this.empty.hidden = true;
       this.listStatus = node('p', 'remote-status chat-folder');
-      this.listView.append(listBar, this.list, this.empty, this.listStatus);
+      this.listView.append(listBar, this.list, this.empty, this.actions, this.listStatus);
 
       this.threadView = node('section', 'chat-thread-view');
       this.threadView.hidden = true;
@@ -162,6 +186,11 @@
         return;
       }
       if (e.type !== 'delta') this.listChanged();
+      if (e.type === 'removed') {
+        for (const id of e.ids) this.selected.delete(id);
+        if (this.chat?.id && e.ids.includes(this.chat.id)) this.showList();
+        return;
+      }
       // While a chat loads, its events wait so none is lost or applied twice.
       if (this.buffer) {
         this.buffer.push(e);
@@ -209,8 +238,19 @@
     renderList() {
       this.list.replaceChildren(
         ...this.chats.map(chat => {
-          const row = button('', () => this.open(chat.id), 'chat-row');
-          row.setAttribute('role', 'listitem');
+          const selecting = this.selecting;
+          const row = button(
+            '',
+            () => (selecting ? this.toggle(chat.id) : this.open(chat.id)),
+            'chat-row'
+          );
+          row.setAttribute('role', selecting ? 'checkbox' : 'listitem');
+          if (selecting) {
+            const checked = this.selected.has(chat.id);
+            row.setAttribute('aria-checked', String(checked));
+            row.classList.toggle('selected', checked);
+            row.append(node('span', 'chat-check'));
+          }
           const top = node('span', 'chat-row-top');
           top.append(
             node('span', 'chat-row-title', chat.title),
@@ -225,8 +265,71 @@
       this.listStatus.textContent =
         this.available === false
           ? `Claude Code is not installed on ${HyprlandApps.host.name}.`
-          : `Saved in ${this.folder || '~/Chats'}`;
+          : this.listError || `Saved in ${this.folder || '~/Chats'}`;
+      this.listStatus.classList.toggle('error', !!this.listError);
       this.newButton.disabled = this.available === false;
+      this.selectButton.hidden = this.selecting || !this.chats.length;
+      this.renderActions();
+    }
+    select(on) {
+      if (on) this.listError = '';
+      this.selecting = on;
+      this.selected.clear();
+      this.confirming = false;
+      this.renderList();
+    }
+    toggle(id) {
+      if (this.selected.has(id)) this.selected.delete(id);
+      else this.selected.add(id);
+      this.confirming = false;
+      this.renderList();
+    }
+    confirmDelete(on) {
+      this.confirming = on;
+      this.renderActions();
+    }
+    renderActions() {
+      const count = this.selected.size;
+      const chats = count === 1 ? 'chat' : 'chats';
+      this.heading.textContent = this.selecting ? `${count} selected` : 'Chats';
+      this.cancelSelect.hidden = !this.selecting;
+      this.newButton.hidden = !!this.selecting;
+      this.actions.hidden = !this.selecting;
+      this.actions.classList.toggle('confirming', !!this.confirming);
+      this.actionText.textContent = this.confirming
+        ? `Delete ${count} ${chats} permanently?`
+        : count
+          ? ''
+          : 'Select chats';
+      this.archiveButton.hidden = this.deleteButton.hidden = !!this.confirming;
+      this.keepButton.hidden = this.confirmButton.hidden = !this.confirming;
+      this.archiveButton.disabled = this.deleteButton.disabled = !count || this.working;
+      this.confirmButton.disabled = this.working;
+    }
+    archive() {
+      return this.manage('archive');
+    }
+    remove() {
+      return this.manage('delete');
+    }
+    async manage(action) {
+      const ids = [...this.selected];
+      if (!ids.length) return;
+      this.working = true;
+      this.renderActions();
+      try {
+        const result = await request('/' + action, { ids });
+        this.select(false);
+        this.listError = result.failed.length
+          ? `Could not ${action} ${result.failed.length}: ${result.failed[0].error}`
+          : '';
+      } catch (e) {
+        this.listError = e.message;
+      } finally {
+        this.working = false;
+        this.renderActions();
+        this.refresh();
+      }
     }
     showList() {
       this.chat = null;

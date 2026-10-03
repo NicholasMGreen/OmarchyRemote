@@ -158,6 +158,83 @@
   flex: none;
   padding: 8px 12px 4px;
 }
+.chat-folder.error {
+  color: var(--theme-red);
+}
+.chat-text-button {
+  flex: none;
+  height: 36px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--theme-accent);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.chat-text-button:active {
+  background: var(--theme-surface-raised);
+}
+.chat-row[role='checkbox'] {
+  position: relative;
+  padding-left: 40px;
+}
+.chat-check {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  width: 18px;
+  height: 18px;
+  box-sizing: border-box;
+  border: 1.5px solid var(--theme-secondary);
+  border-radius: 50%;
+  transform: translateY(-50%);
+}
+.chat-row.selected {
+  background: color-mix(in srgb, var(--theme-accent) 10%, transparent);
+}
+.chat-row.selected .chat-check {
+  border-color: var(--theme-accent);
+  background: var(--theme-accent);
+  box-shadow: inset 0 0 0 3px var(--theme-background);
+}
+.chat-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 8px 2px;
+  border-top: 1px solid var(--theme-border);
+}
+.chat-actions-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--theme-secondary);
+}
+.chat-actions.confirming .chat-actions-text {
+  color: var(--theme-foreground);
+}
+.chat-actions .remote-button {
+  flex: none;
+  padding: 8px 14px;
+  font-size: 13px;
+}
+.chat-actions .remote-button:disabled {
+  opacity: 0.4;
+}
+.chat-actions:not(.confirming) .remote-button:first-of-type {
+  margin-left: auto;
+}
+.chat-danger {
+  color: var(--theme-red);
+}
+.chat-actions.confirming .chat-danger {
+  color: var(--theme-background);
+  background: var(--theme-red);
+  border-color: var(--theme-red);
+}
 /* Herdr's text size: 12 px on phones, 13 px on desk layouts. */
 .chat-messages {
   flex: 1;
