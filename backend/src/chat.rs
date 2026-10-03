@@ -20,7 +20,10 @@ use std::{
     os::unix::fs::{DirBuilderExt, OpenOptionsExt},
     path::{Path as FsPath, PathBuf},
     process::Stdio,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
@@ -488,11 +491,15 @@ struct Running {
 pub struct Chats {
     running: Arc<Mutex<HashMap<String, Arc<Running>>>>,
     events: broadcast::Sender<Value>,
+    /// Numbers every event. A chat read reports the number its state includes, so a client
+    /// applies only the events after it.
+    counter: Arc<AtomicU64>,
 }
 pub fn start() -> Chats {
     let chats = Chats {
         running: Arc::new(Mutex::new(HashMap::new())),
         events: broadcast::channel(1024).0,
+        counter: Arc::new(AtomicU64::new(0)),
     };
     let reaper = chats.clone();
     tokio::spawn(async move {
@@ -517,6 +524,12 @@ pub fn start() -> Chats {
     chats
 }
 impl Chats {
+    /// Numbers events while the conversation they change is still locked.
+    fn stamp(&self, events: &mut [Value]) {
+        for event in events {
+            event["n"] = json!(self.counter.fetch_add(1, Ordering::SeqCst) + 1);
+        }
+    }
     fn emit(&self, events: Vec<Value>) {
         for event in events {
             let _ = self.events.send(event);
@@ -590,7 +603,8 @@ impl Chats {
                 };
                 let events = {
                     let mut live = reader.live.lock().unwrap();
-                    let events = live.apply(&value);
+                    let mut events = live.apply(&value);
+                    chats.stamp(&mut events);
                     if events.iter().any(|e| e["type"] != "delta")
                         && let Err(e) = save(&live.conversation, &live.path)
                     {
@@ -637,6 +651,7 @@ impl Chats {
             };
             events.push(json!({"type":"done","id":id,"error":error}));
         }
+        self.stamp(&mut events);
         drop(live);
         self.emit(events);
     }
@@ -670,6 +685,7 @@ pub async fn read(State(app): State<App>, Path(id): Path<String>) -> Result<Json
         value["busy"] = json!(live.busy);
         value["partial"] = json!(live.partial);
         value["seq"] = json!(live.seq);
+        value["n"] = json!(app.chats.counter.load(Ordering::SeqCst));
         return Ok(Json(value));
     }
     let folder = folder(&root().map_err(error)?).map_err(error)?;
@@ -679,6 +695,7 @@ pub async fn read(State(app): State<App>, Path(id): Path<String>) -> Result<Json
     value["busy"] = json!(false);
     value["partial"] = json!("");
     value["seq"] = json!(0);
+    value["n"] = json!(app.chats.counter.load(Ordering::SeqCst));
     Ok(Json(value))
 }
 
@@ -751,10 +768,11 @@ pub async fn send(
         let mut live = running.live.lock().unwrap();
         let entry = Entry::new("user", "", &text);
         let id = live.conversation.id.clone();
-        let events = vec![
+        let mut events = vec![
             json!({"type":"entry","id":id,"index":live.conversation.entries.len(),"entry":entry.json()}),
             json!({"type":"busy","id":id}),
         ];
+        chats.stamp(&mut events);
         live.conversation.entries.push(entry);
         live.conversation.updated = now();
         live.busy = true;
