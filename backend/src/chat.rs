@@ -548,9 +548,12 @@ impl Chats {
             "stream-json",
             "--verbose",
             "--include-partial-messages",
-            // Nobody answers approval prompts yet: anything that would ask is denied.
+            // Nobody answers approval prompts yet: anything that would ask is denied, except
+            // web search and fetching pages, which a chat needs and which change nothing here.
             "--permission-prompts",
             "none",
+            "--allowedTools",
+            "WebSearch,WebFetch",
         ]
         .map(String::from)
         .into();
