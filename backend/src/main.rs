@@ -1,6 +1,7 @@
 mod ansi;
 mod apps;
 mod browser;
+mod chat;
 mod codexbar;
 mod dictation;
 mod files;
@@ -43,6 +44,7 @@ struct App {
     herdr: herdr::Herdr,
     widgets: widgets::Widgets,
     preferences: preferences::Shared,
+    chats: chat::Chats,
 }
 type ApiError = (StatusCode, Json<Value>);
 fn error(e: impl std::fmt::Display) -> ApiError {
@@ -516,6 +518,7 @@ async fn main() -> anyhow::Result<()> {
         preferences: Arc::new(Mutex::new(preferences::Store::open(
             &apps::data_dir()?.join("settings.sqlite3"),
         )?)),
+        chats: chat::start(),
     };
     let router = Router::new()
         .route("/api/capabilities", get(capabilities))
@@ -568,6 +571,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/terminal/session", post(session))
         .route("/api/terminal/{id}/ws", get(terminal_upgrade))
         .route("/api/terminal/{id}/close", post(terminal_close))
+        .route("/api/chat", get(chat::status))
+        .route("/api/chat/send", post(chat::send))
+        .route("/api/chat/ws", get(chat::upgrade))
+        .route("/api/chat/{id}", get(chat::read))
+        .route("/api/chat/{id}/stop", post(chat::stop))
         .route("/api/voice", get(voice::status))
         .route("/api/herdr/panes/{id}/response", get(voice::response))
         .route("/api/herdr/panes/{id}/speech", post(voice::audio))

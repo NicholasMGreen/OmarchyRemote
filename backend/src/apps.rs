@@ -120,6 +120,7 @@ const SERVICES: &[(&str, &str, &[&str])] = &[
         "Herdr",
         &["workspaces", "agents", "panes", "input"],
     ),
+    ("chat", "Chat", &["conversations", "stream", "stop"]),
 ];
 
 pub fn tui(id: &str) -> Option<&'static HostApp> {
