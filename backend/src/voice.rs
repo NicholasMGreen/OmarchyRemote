@@ -24,8 +24,8 @@ use tokio::{io::AsyncReadExt, process::Command, sync::Semaphore};
 const MAX_TEXT: usize = 64 * 1024;
 const MAX_AUDIO: u64 = 32 * 1024 * 1024;
 static JOBS: Semaphore = Semaphore::const_new(1);
-type ReadCache = HashMap<PathBuf, (u64, SystemTime, Value)>;
-static READS: LazyLock<Mutex<ReadCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static READS: LazyLock<Mutex<HashMap<PathBuf, Tail>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 // Bounded, process-local audio cache: no permanent copies of conversations on disk.
 static AUDIO: LazyLock<Mutex<HashMap<String, Vec<u8>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -288,17 +288,23 @@ impl Paragraphs {
         values
     }
 }
-fn parse(agent: &str, log: &str) -> Value {
-    let mut answer = Value::Null;
-    let mut updates: Vec<Value> = Vec::new();
-    let mut turn = Value::Null;
-    let mut active = false;
-    let mut candidate = String::new();
-    let mut candidate_id = String::new();
-    let mut paragraphs = Paragraphs::default();
-    for (line_number, line) in log.lines().enumerate() {
+/// Assistant prose of a transcript, fed one line at a time so polling reads only what was appended.
+#[derive(Default)]
+struct Transcript {
+    answer: Value,
+    updates: Vec<Value>,
+    turn: Value,
+    active: bool,
+    candidate: String,
+    candidate_id: String,
+    paragraphs: Paragraphs,
+    line: usize,
+}
+impl Transcript {
+    fn feed(&mut self, agent: &str, line: &str) {
+        self.line += 1;
         let Ok(v) = serde_json::from_str::<Value>(line) else {
-            continue;
+            return;
         };
         if agent == "codex" {
             let p = &v["payload"];
@@ -306,55 +312,60 @@ fn parse(agent: &str, log: &str) -> Value {
                 && p["role"] == "assistant"
                 && p["phase"] == "final_answer"
             {
-                candidate = blocks(&p["content"]);
-                if active {
-                    paragraphs.put(format!("{turn}:final"), candidate.clone(), true);
+                self.candidate = blocks(&p["content"]);
+                if self.active {
+                    self.paragraphs.put(
+                        format!("{}:final", self.turn),
+                        self.candidate.clone(),
+                        true,
+                    );
                 }
             }
-            if active
-                && !turn.is_null()
+            if self.active
+                && !self.turn.is_null()
                 && v["type"] == "response_item"
                 && p["role"] == "assistant"
                 && p["phase"] == "commentary"
             {
                 let text = blocks(&p["content"]);
                 if !text.trim().is_empty() {
-                    let key = format!("update:{turn}:{}", updates.len());
-                    paragraphs.put(key.clone(), text.clone(), true);
-                    updates.push(json!({"key":key,"text":text}));
+                    let key = format!("update:{}:{}", self.turn, self.updates.len());
+                    self.paragraphs.put(key.clone(), text.clone(), true);
+                    self.updates.push(json!({"key":key,"text":text}));
                 }
             }
             if v["type"] != "event_msg" {
-                continue;
+                return;
             }
             match p["type"].as_str().unwrap_or_default() {
                 "task_started" => {
-                    turn = p
+                    self.turn = p
                         .get("turn_id")
                         .filter(|v| !v.is_null())
                         .cloned()
                         .or_else(|| v.get("timestamp").cloned())
-                        .unwrap_or(json!(line_number));
-                    updates.clear();
-                    paragraphs.0.clear();
-                    active = true;
-                    candidate.clear();
+                        .unwrap_or(json!(self.line));
+                    self.updates.clear();
+                    self.paragraphs.0.clear();
+                    self.active = true;
+                    self.candidate.clear();
                 }
                 "turn_aborted" => {
-                    updates.clear();
-                    paragraphs.0.clear();
-                    turn = Value::Null;
-                    active = false;
-                    candidate.clear();
+                    self.updates.clear();
+                    self.paragraphs.0.clear();
+                    self.turn = Value::Null;
+                    self.active = false;
+                    self.candidate.clear();
                 }
                 "task_complete" => {
-                    active = false;
-                    let text = p["last_agent_message"].as_str().unwrap_or(&candidate);
+                    self.active = false;
+                    let text = p["last_agent_message"].as_str().unwrap_or(&self.candidate);
                     if !text.trim().is_empty() {
-                        paragraphs.put(format!("{turn}:final"), text.to_owned(), true);
-                        answer = json!({"key":p["turn_id"],"text":text});
+                        self.paragraphs
+                            .put(format!("{}:final", self.turn), text.to_owned(), true);
+                        self.answer = json!({"key":p["turn_id"],"text":text});
                     }
-                    candidate.clear();
+                    self.candidate.clear();
                 }
                 _ => {}
             }
@@ -370,7 +381,7 @@ fn parse(agent: &str, log: &str) -> Value {
                 .any(|prefix| s.trim_start().starts_with(prefix))
             });
             if v["isMeta"] == true || local {
-                continue;
+                return;
             }
             if v["type"] == "user" {
                 // Tool results are user-role records too; they continue the same turn.
@@ -378,107 +389,173 @@ fn parse(agent: &str, log: &str) -> Value {
                     .as_array()
                     .is_some_and(|blocks| blocks.iter().any(|b| b["type"] == "tool_result"));
                 if !tool_result {
-                    turn = v.get("uuid").cloned().unwrap_or(json!(line_number));
-                    updates.clear();
-                    paragraphs.0.clear();
+                    self.turn = v.get("uuid").cloned().unwrap_or(json!(self.line));
+                    self.updates.clear();
+                    self.paragraphs.0.clear();
                 }
-                active = true;
-                candidate.clear();
-                candidate_id.clear();
+                self.active = true;
+                self.candidate.clear();
+                self.candidate_id.clear();
             }
             if v["type"] != "assistant" {
-                continue;
+                return;
             }
-            active = true;
-            if !turn.is_null() {
+            self.active = true;
+            if !self.turn.is_null() {
                 let message = m
                     .get("id")
                     .or_else(|| v.get("uuid"))
                     .cloned()
-                    .unwrap_or(json!(line_number));
-                paragraphs.put(
-                    format!("{turn}:{message}"),
+                    .unwrap_or(json!(self.line));
+                self.paragraphs.put(
+                    format!("{}:{message}", self.turn),
                     blocks(&m["content"]),
                     m["stop_reason"] == "end_turn" || m["stop_reason"] == "tool_use",
                 );
             }
             // These are persisted assistant text blocks, not streaming deltas or thinking.
-            if !turn.is_null() && m["stop_reason"] == "tool_use" {
+            if !self.turn.is_null() && m["stop_reason"] == "tool_use" {
                 let text = blocks(&m["content"]);
                 let key = format!(
-                    "update:{turn}:{}",
-                    v.get("uuid").cloned().unwrap_or(json!(line_number))
+                    "update:{}:{}",
+                    self.turn,
+                    v.get("uuid").cloned().unwrap_or(json!(self.line))
                 );
-                if !text.trim().is_empty() && !updates.iter().any(|u| u["key"] == key) {
-                    updates.push(json!({"key":key,"text":text}));
+                if !text.trim().is_empty() && !self.updates.iter().any(|u| u["key"] == key) {
+                    self.updates.push(json!({"key":key,"text":text}));
                 }
             }
             if m["stop_reason"] != "end_turn" {
-                candidate.clear();
-                candidate_id.clear();
-                continue;
+                self.candidate.clear();
+                self.candidate_id.clear();
+                return;
             }
             let text = blocks(&m["content"]);
             if text.is_empty() {
-                continue;
+                return;
             }
             let id = m["id"].as_str().unwrap_or_default();
-            if candidate_id != id {
-                candidate.clear();
-                candidate_id = id.to_owned();
+            if self.candidate_id != id {
+                self.candidate.clear();
+                self.candidate_id = id.to_owned();
             }
-            if !candidate.is_empty() {
-                candidate.push_str("\n\n");
+            if !self.candidate.is_empty() {
+                self.candidate.push_str("\n\n");
             }
-            candidate.push_str(&text);
-            answer = json!({"key":id,"text":candidate});
-            active = false;
+            self.candidate.push_str(&text);
+            self.answer = json!({"key":id,"text":self.candidate});
+            self.active = false;
         }
     }
-    json!({"answer":answer,"updates":updates,"paragraphs":paragraphs.values(),"working":active})
+    fn value(&self) -> Value {
+        json!({"answer":self.answer,"updates":self.updates,"paragraphs":self.paragraphs.values(),"working":self.active})
+    }
+}
+#[cfg(test)]
+fn parse(agent: &str, log: &str) -> Value {
+    let mut transcript = Transcript::default();
+    for line in log.lines() {
+        transcript.feed(agent, line);
+    }
+    transcript.value()
+}
+const WINDOW: u64 = 16 * 1024 * 1024;
+/// Where reading stopped: `offset` is just past the last complete line fed to `transcript`.
+struct Tail {
+    len: u64,
+    modified: SystemTime,
+    offset: u64,
+    transcript: Transcript,
+    value: Value,
+}
+/// Feeds the complete lines of `bytes` and returns how many bytes they used.
+fn feed_lines(transcript: &mut Transcript, agent: &str, bytes: &[u8]) -> u64 {
+    let Some(end) = bytes.iter().rposition(|b| *b == b'\n') else {
+        return 0;
+    };
+    for line in bytes[..end].split(|b| *b == b'\n') {
+        transcript.feed(agent, &String::from_utf8_lossy(line));
+    }
+    end as u64 + 1
 }
 fn read_answer(agent: &str, path: &FsPath) -> anyhow::Result<Value> {
     let meta = fs::metadata(path)?;
-    let modified = meta.modified()?;
-    if let Some((len, time, value)) = READS.lock().unwrap().get(path)
-        && *len == meta.len()
-        && *time == modified
-    {
-        return Ok(value.clone());
-    }
+    let (len, modified) = (meta.len(), meta.modified()?);
+    let cached = READS.lock().unwrap().remove(path);
     let mut file = fs::File::open(path)?;
-    let offset = meta.len().saturating_sub(16 * 1024 * 1024);
-    file.seek(SeekFrom::Start(offset))?;
-    let mut bytes = Vec::new();
-    file.take(16 * 1024 * 1024).read_to_end(&mut bytes)?;
-    let text = String::from_utf8_lossy(&bytes);
-    let text = if offset > 0 {
-        text.split_once('\n').map(|(_, t)| t).unwrap_or_default()
-    } else {
-        &text
+    // Logs only grow; anything else (a shorter file, a large jump, a misaligned line) starts over.
+    let tail = match cached {
+        Some(tail) if tail.len == len && tail.modified == modified => Some(tail),
+        Some(mut tail) if tail.offset > 0 && len >= tail.offset && len - tail.offset <= WINDOW => {
+            let mut bytes = Vec::new();
+            file.seek(SeekFrom::Start(tail.offset - 1))?;
+            (&mut file)
+                .take(len - tail.offset + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.first() == Some(&b'\n') {
+                tail.offset += feed_lines(&mut tail.transcript, agent, &bytes[1..]);
+                tail.value = Value::Null;
+                Some(tail)
+            } else {
+                None
+            }
+        }
+        _ => None,
     };
-    let mut value = parse(agent, text);
+    let mut tail = match tail {
+        Some(tail) => tail,
+        None => {
+            let start = len.saturating_sub(WINDOW);
+            let mut bytes = Vec::new();
+            file.seek(SeekFrom::Start(start))?;
+            file.take(len - start).read_to_end(&mut bytes)?;
+            // A window that starts mid-file begins after its first, partial line.
+            let skip = if start > 0 {
+                bytes
+                    .iter()
+                    .position(|b| *b == b'\n')
+                    .map_or(bytes.len(), |i| i + 1)
+            } else {
+                0
+            };
+            let mut transcript = Transcript::default();
+            let used = feed_lines(&mut transcript, agent, &bytes[skip..]);
+            Tail {
+                len,
+                modified,
+                offset: start + skip as u64 + used,
+                transcript,
+                value: Value::Null,
+            }
+        }
+    };
+    tail.len = len;
+    tail.modified = modified;
+    if tail.value.is_null() {
+        tail.value = identified(tail.transcript.value(), path);
+    }
+    let value = tail.value.clone();
+    let mut cache = READS.lock().unwrap();
+    if cache.len() >= 32 {
+        cache.clear();
+    }
+    cache.insert(path.to_owned(), tail);
+    Ok(value)
+}
+fn identified(mut value: Value, path: &FsPath) -> Value {
     let session = path.file_stem().unwrap_or_default().to_string_lossy();
     value["session"] = json!(session);
     if !value["answer"].is_null() {
         identify(&mut value["answer"], &session);
     }
-    if let Some(updates) = value["updates"].as_array_mut() {
-        for update in updates {
-            identify(update, &session);
+    for list in ["updates", "paragraphs"] {
+        if let Some(messages) = value[list].as_array_mut() {
+            for message in messages {
+                identify(message, &session);
+            }
         }
     }
-    if let Some(paragraphs) = value["paragraphs"].as_array_mut() {
-        for paragraph in paragraphs {
-            identify(paragraph, &session);
-        }
-    }
-    let mut cache = READS.lock().unwrap();
-    if cache.len() >= 32 {
-        cache.clear();
-    }
-    cache.insert(path.to_owned(), (meta.len(), modified, value.clone()));
-    Ok(value)
+    value
 }
 fn identify(message: &mut Value, session: &str) {
     let key = format!("{}:{}:{}", session, message["key"], message["text"]);
@@ -1067,6 +1144,35 @@ mod tests {
         let mut next = rows;
         next.push(json!({"type":"user","uuid":"turn-two","message":{"content":"Next"}}));
         assert_eq!(parse("claude", &log(&next))["updates"], json!([]));
+    }
+    #[test]
+    fn appended_lines_are_read_incrementally_and_rewrites_start_over() {
+        let dir = dictation::AudioDir::new().unwrap();
+        let path = dir.0.join("session.jsonl");
+        let rows = [
+            json!({"type":"user","uuid":"turn","message":{"content":"Request"}}),
+            json!({"type":"assistant","uuid":"a","message":{"stop_reason":"tool_use","content":[{"type":"text","text":"Checking."}]}}),
+            json!({"type":"assistant","message":{"id":"final","stop_reason":"end_turn","content":[{"type":"text","text":"Done."}]}}),
+        ];
+        let line = |row: &Value| format!("{row}\n");
+        let full = |text: &str| identified(parse("claude", text), &path);
+        fs::write(&path, line(&rows[0])).unwrap();
+        assert_eq!(read_answer("claude", &path).unwrap()["working"], true);
+        // A half-written line waits until it is complete.
+        let partial = format!("{}{}", line(&rows[0]), &line(&rows[1])[..20]);
+        fs::write(&path, &partial).unwrap();
+        assert_eq!(read_answer("claude", &path).unwrap()["updates"], json!([]));
+        let text: String = rows.iter().map(line).collect();
+        fs::write(&path, &text).unwrap();
+        let offset = READS.lock().unwrap()[&path].offset;
+        assert_eq!(offset, line(&rows[0]).len() as u64);
+        assert_eq!(read_answer("claude", &path).unwrap(), full(&text));
+        assert_eq!(READS.lock().unwrap()[&path].offset, text.len() as u64);
+        // A rewritten log of a different shape is read again from its start.
+        let rewritten = line(&json!({"type":"user","uuid":"other","message":{"content":"New"}}));
+        fs::write(&path, &rewritten).unwrap();
+        assert_eq!(read_answer("claude", &path).unwrap(), full(&rewritten));
+        READS.lock().unwrap().remove(&path);
     }
     #[test]
     fn speech_ids_accept_only_current_progress_or_completed_answer() {

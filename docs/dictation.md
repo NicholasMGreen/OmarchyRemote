@@ -163,7 +163,8 @@ Voice mode also queues completed paragraphs from persisted assistant prose befor
 the entire turn finishes. Paragraph IDs remain stable when the final answer arrives,
 so already-spoken text is not repeated. Available paragraphs are batched into one
 speech request; an incomplete trailing paragraph waits for its boundary or message
-completion. The app checks for new prose every second when it can play it. This is
+completion. The app checks for new prose every second when it can play it; the host
+reads only the lines appended to the transcript since the last check. This is
 limited by the agent's transcript: if the CLI only writes a message when it finishes,
 we cannot speak its paragraphs earlier. Tool calls, reasoning, and worker text remain
 excluded. **Read** still reads the latest completed answer in full.
