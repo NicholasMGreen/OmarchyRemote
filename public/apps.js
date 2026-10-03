@@ -96,6 +96,14 @@
     native: true,
     deskKeys: [{ keys: '⇧ A', shift: true, code: /^KeyA$/, label: 'Herd agents' }],
   });
+  define('chat', {
+    name: 'chat',
+    color: 'var(--theme-magenta)',
+    glyph: 'ch',
+    icon: '\uf086',
+    description: 'chats with claude',
+    native: true,
+  });
   define('btop', {
     name: 'btop',
     color: 'var(--theme-green)',
@@ -202,6 +210,7 @@
     'files',
     ...(browserEnabled ? ['browser'] : []),
     'herdr',
+    'chat',
     'btop',
     'services',
     'lazydocker',

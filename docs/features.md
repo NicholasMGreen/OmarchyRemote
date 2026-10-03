@@ -38,6 +38,12 @@ Terminal and Herdr output use native browser overflow scrolling, including smoot
 
 If the backend or Herdr is unavailable, the app shows a connection error and retries. The native app's bundled offline copy cannot reach the host APIs.
 
+## Chat
+
+Chat is a ChatGPT-style conversation with Claude Code that needs no project. Tap **New chat**, type, and the reply streams in as Markdown: headings, lists, tables, code blocks, and links, which open outside the app. Lines such as **WebSearch** note the tools Claude used; its reasoning and tool output stay hidden. **Stop** ends a reply and keeps what was written so far. The chat list shows each conversation's title (its first line), last message, and age, and the app reopens the last chat after a reload. A message that cannot be sent stays in the composer as a draft.
+
+Claude runs on the host in `~/Chats` (set `OMARCHY_CHAT_DIR` in the backend environment to move it), so files it creates land there. Each conversation is saved as a readable Markdown file in `~/Chats/conversations`, named with its date and title. The folder is private to your user, and you can keep it in git to back it up. A conversation's Claude process stays running between messages and stops after 15 idle minutes; the next message resumes it. Tools that would ask for approval are denied for now. To allow more, set `OMARCHY_CHAT_CLAUDE_ARGS` to a JSON array of Claude Code arguments, such as a `--permission-mode` or a `--model`.
+
 ## Files
 
 Files browses the host home directory with breadcrumbs, grouped folder and file rows, extension badges, and real metadata. Search names in the current folder, contents below it, or names and contents across HOME. The menu also offers a fuzzy finder with recent files and home, git, and config shortcuts. Search supports case, hidden files, regex and glob filters. Searches are bounded and report when results are limited; `.git`, `node_modules`, `target`, and `.cache` trees are skipped.
