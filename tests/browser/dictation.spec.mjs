@@ -655,6 +655,27 @@ test('Voice queues initial and progress text before the final answer without int
   expect(state.generated).toHaveLength(3);
 });
 
+test('Voice retries a paragraph whose speech failed instead of skipping it', async ({ page }) => {
+  const { app, state } = await voiceSetup(page);
+  let failures = 1;
+  await page.unroute('**/api/herdr/panes/*/speech');
+  await page.route('**/api/herdr/panes/*/speech', r => {
+    state.generated.push(r.request().postDataJSON());
+    if (failures-- > 0)
+      return r.fulfill({ status: 429, json: { error: 'Speech is busy; try Replay shortly' } });
+    return r.fulfill({ contentType: 'audio/wav', body: 'fixture audio' });
+  });
+  await app.getByRole('button', { name: 'Start dictation' }).click({ delay: 650 });
+  await expect(app.getByRole('button', { name: 'Turn off Voice mode' })).toBeVisible();
+  state.response.working = true;
+  state.response.paragraphs = [{ id: 'first', text: 'First paragraph.' }];
+  await expect.poll(() => state.generated.length, { timeout: 6000 }).toBe(1);
+  await expect(app.locator('.herdr-voice-status')).toContainText('Retrying shortly');
+  // The same paragraph is requested again after the delay, not dropped.
+  await expect.poll(() => state.generated.length, { timeout: 12000 }).toBe(2);
+  expect(state.generated.map(request => request.response_ids)).toEqual([['first'], ['first']]);
+  await expect(app.locator('.herdr-voice-status')).toContainText('Speaking');
+});
 test('Voice skips existing progress on enable, speaks new progress while working, and drops it on thread change', async ({
   page,
 }) => {

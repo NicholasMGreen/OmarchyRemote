@@ -188,6 +188,8 @@
       this.enabled = keepMode;
       this.ready = false;
       this.autoRead = false;
+      this.retryAt = 0;
+      this.retryDelay = 0;
       this.pane = null;
       this.session = null;
       this.loading = false;
@@ -282,7 +284,7 @@
             const messages = value.paragraphs ? [...value.paragraphs] : [...(value.updates || [])];
             if (!value.paragraphs && !value.working && value.answer) messages.push(value.answer);
             const next = messages.find(message => message.id && !this.seen.has(message.id));
-            if (next) {
+            if (next && Date.now() >= (this.retryAt || 0)) {
               // Batch paragraphs already available into one synthesis request.
               // Later paragraphs can join the next request without repeating these.
               const batch = [next];
@@ -296,11 +298,19 @@
                 }
               }
               batch.forEach(message => this.seen.add(message.id));
-              await this.speak(
+              const spoken = await this.speak(
                 this.pane,
                 next.id,
-                batch.map(message => message.id)
+                batch.map(message => message.id),
+                true
               );
+              // A failed batch goes back in the queue, retried after a growing delay so a
+              // broken speech provider is not run every second. Stop still skips it.
+              if (spoken === false && epoch === this.epoch) {
+                batch.forEach(message => this.seen.delete(message.id));
+                this.retryDelay = Math.min(60000, (this.retryDelay || 2500) * 2);
+                this.retryAt = Date.now() + this.retryDelay;
+              } else if (spoken) this.retryDelay = 0;
             }
           }
         }
@@ -415,7 +425,9 @@
         if (epoch === this.epoch) this.status(e.message);
       }
     }
-    async speak(pane, id, ids = [id]) {
+    // Resolves false when speech failed, true when it played or awaits Play answer, and
+    // undefined when Stop or a newer request superseded it.
+    async speak(pane, id, ids = [id], automatic = false) {
       this.stopPlayback();
       const epoch = this.epoch;
       const generation = this.playGeneration;
@@ -446,12 +458,11 @@
           );
           this.streamPlayer = stream;
           await stream.play(response);
-          if (epoch === this.epoch && generation === this.playGeneration) {
-            this.streamPlayer = null;
-            this.stop.hidden = true;
-            this.status(this.enabled ? 'Ready to talk' : '', false);
-          }
-          return;
+          if (epoch !== this.epoch || generation !== this.playGeneration) return;
+          this.streamPlayer = null;
+          this.stop.hidden = true;
+          this.status(this.enabled ? 'Ready to talk' : '', false);
+          return true;
         }
         const blob = await response.blob();
         if (
@@ -466,25 +477,28 @@
           await this.player.play();
           if (epoch !== this.epoch || generation !== this.playGeneration) return;
           this.status('Speaking', false);
+          return true;
         } catch (e) {
           if (epoch !== this.epoch || generation !== this.playGeneration) return;
           if (e.name !== 'NotAllowedError') {
             this.stop.hidden = true;
             this.status('Audio playback failed. Try Read.');
-            return;
+            return false;
           }
           this.status('Answer ready · tap Play answer', false);
           this.replay.textContent = 'Play answer';
           this.needsPlay = true;
           this.stop.hidden = true;
+          return true;
         }
       } catch (e) {
         if (epoch === this.epoch && generation === this.playGeneration) {
           this.playAbort.abort();
           this.streamPlayer?.stop();
           this.streamPlayer = null;
-          this.status(e.message + ' Use Read to retry.');
+          this.status(e.message + (automatic ? ' Retrying shortly.' : ' Use Read to retry.'));
           this.stop.hidden = true;
+          return false;
         }
       } finally {
         if (epoch === this.epoch && generation === this.playGeneration) this.speaking = false;

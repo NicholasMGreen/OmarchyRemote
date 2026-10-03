@@ -167,7 +167,9 @@ completion. The app checks for new prose every second when it can play it; the h
 reads only the lines appended to the transcript since the last check. This is
 limited by the agent's transcript: if the CLI only writes a message when it finishes,
 we cannot speak its paragraphs earlier. Tool calls, reasoning, and worker text remain
-excluded. **Read** still reads the latest completed answer in full.
+excluded. If speech for a batch fails (the host is busy, or the provider errors), the
+batch is retried after a delay that grows from 5 seconds to a minute; **Stop** skips it
+instead. **Read** still reads the latest completed answer in full.
 
 The player schedules PCM chunks on a single Web Audio clock. Stop, starting a new
 recording, changing threads, and leaving the foreground abort the request and discard
