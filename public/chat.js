@@ -162,6 +162,8 @@
 
       this.nativeInput = bridge.createInput(this.threadView, true, text => this.send(text), {
         compactControls: true,
+        // Sending hides the keyboard so the reply has the whole screen.
+        dismissOnSend: true,
         draftStore: 'omarchy-chat-drafts-v1',
       });
       // Chat is always a message: no terminal keys, and tapping the conversation hides the

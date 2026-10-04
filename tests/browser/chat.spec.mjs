@@ -129,6 +129,9 @@ test('a new chat streams its reply, shows tools, and can be stopped', async ({ p
   await expect
     .poll(() => state.sent)
     .toEqual([{ id: null, text: 'What is a pelican?', model: '', effort: '' }]);
+  // Sending hides the keyboard; the message box stand-in takes its place.
+  await expect(field).toBeHidden();
+  await expect(app.getByRole('button', { name: 'Write a message' })).toBeVisible();
   // The tool event can arrive before the new chat has loaded; it still appears once.
   await expect(app.locator('.chat-title')).toHaveText('What is a pelican?');
   await expect(app.locator('.chat-message.user')).toHaveText('What is a pelican?');
