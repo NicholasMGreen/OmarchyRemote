@@ -99,6 +99,18 @@
       }
     }
   }
+  const herdrPath = (pane, suffix) => '/api/herdr/panes/' + encodeURIComponent(pane) + '/' + suffix;
+  // Where Voice mode reads a thread's latest reply, speaks it, and sends a recording. Herdr's
+  // threads are agent panes; another app passes its own (Chat sends through its composer).
+  const herdrEndpoints = {
+    latest: async (voice, pane) => (await voice.request(herdrPath(pane, 'response'))).json(),
+    speech: pane => herdrPath(pane, 'speech'),
+    send: (voice, pane, text, session) =>
+      voice.request(herdrPath(pane, 'voice-input'), {
+        method: 'POST',
+        body: JSON.stringify({ text, session }),
+      }),
+  };
   class Voice {
     constructor(dictation, root, outputTools) {
       this.dictation = dictation;
@@ -144,6 +156,7 @@
       this.row.hidden = !text || !visible;
       this.replay.title = text || 'Read the last response';
       this.replay.setAttribute('aria-busy', String(text === 'Generating speech on host…'));
+      this.dictation.changed?.();
     }
     async request(path, options = {}) {
       const response = await fetch(path, {
@@ -161,11 +174,8 @@
       }
       return response;
     }
-    path(pane, suffix) {
-      return '/api/herdr/panes/' + encodeURIComponent(pane) + '/' + suffix;
-    }
-    async latest(pane) {
-      return (await this.request(this.path(pane, 'response'))).json();
+    latest(pane) {
+      return this.dictation.endpoints.latest(this, pane);
     }
     stopPlayback() {
       ++this.playGeneration;
@@ -248,6 +258,17 @@
       this.dictation.syncMicrophone();
       this.status(on ? 'Replies read aloud' : 'Replies stay silent', false);
     }
+    // The same thread under a new id, such as a new chat once the host names it: Voice keeps
+    // following it, and takes the session from its next reading.
+    retarget(target) {
+      if (!this.enabled && !this.loading) return;
+      this.pane = target;
+      this.session = null;
+      if (this.enabled && !this.loading) {
+        clearTimeout(this.timer);
+        this.poll();
+      }
+    }
     changeThread() {
       const keepMode = this.enabled || this.loading;
       this.reset(keepMode);
@@ -307,7 +328,8 @@
         if (!document.hidden && this.dictation.state === 'idle' && !this.speaking) {
           const value = await this.latest(this.pane);
           if (epoch !== this.epoch || this.dictation.state !== 'idle' || document.hidden) return;
-          if (value.session !== this.session) {
+          if (this.session === null) this.session = value.session;
+          else if (value.session !== this.session) {
             this.changeThread();
             return;
           }
@@ -402,6 +424,7 @@
           context.pane !== this.dictation.getTarget()
         )
           return;
+        this.session ??= latest.session;
         if (latest.session !== this.session || input.draft !== text) {
           this.status('Saved as a draft; the conversation or composer changed.');
           return;
@@ -413,10 +436,7 @@
           ...(latest.paragraphs || []).map(part => part.id),
         ]);
         // Explicit REST acknowledgement; never retry a send after a lost connection.
-        await this.request(this.path(context.pane, 'voice-input'), {
-          method: 'POST',
-          body: JSON.stringify({ text, session: this.session }),
-        });
+        await this.dictation.endpoints.send(this, context.pane, text, this.session);
         if (input.id === context.pane && input.draft === text) {
           input.draft = '';
           input.field.value = '';
@@ -486,7 +506,7 @@
       this.stop.hidden = false;
       this.status('Generating speech on host…', false);
       try {
-        const response = await this.request(this.path(pane, 'speech'), {
+        const response = await this.request(this.dictation.endpoints.speech(pane), {
           method: 'POST',
           body: JSON.stringify({
             response_id: id,
@@ -563,9 +583,13 @@
   }
 
   class Dictation {
-    constructor(input, getTarget, overlayRoot, outputTools) {
+    constructor(input, getTarget, overlayRoot, outputTools, options = {}) {
       this.input = input;
       this.getTarget = getTarget;
+      this.endpoints = options.endpoints || herdrEndpoints;
+      this.group = options.group || 'Herdr';
+      // Called when Voice's controls or status change, so the host view can show them.
+      this.changed = options.changed;
       this.state = 'idle';
       this.generation = 0;
       this.button = button('', () => this.toggle(), 'keycap herdr-attach dictation-button');
@@ -774,6 +798,7 @@
           : !this.voice?.ready
             ? 'Unavailable'
             : 'Talk';
+      this.changed?.();
     }
     async toggle() {
       if (this.voice.enabled && !this.voice.ready && this.state !== 'recording') return;
@@ -906,7 +931,7 @@
           meta: true,
           ctrl: true,
           label: 'Toggle dictation',
-          group: 'Herdr',
+          group: this.group,
           run: () => this.toggle(),
         },
       ];
@@ -930,7 +955,7 @@
       node(
         'p',
         'theme-note',
-        'Herdr: microphone or ⌘⌃X to start/stop. Hold the microphone to toggle Voice mode (or Shift+Enter with the microphone focused). The host administrator can override Voxtype with OMARCHY_DICTATION_COMMAND.'
+        'Herdr and Chat: microphone or ⌘⌃X to start/stop. Hold the microphone to toggle Voice mode (or Shift+Enter with the microphone focused). The host administrator can override Voxtype with OMARCHY_DICTATION_COMMAND.'
       )
     );
     host.append(section);

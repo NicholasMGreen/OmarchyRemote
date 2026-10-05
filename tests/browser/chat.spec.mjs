@@ -4,7 +4,7 @@ const ID = '1b8ab544-8cc5-430e-8a40-0aec58bc3b10';
 const NEW = '2c8ab544-8cc5-430e-8a40-0aec58bc3b10';
 const entry = (role, text, name = '') => ({ role, text, name, time: '2026-10-03T10:00:00Z' });
 
-async function setup(page, extra = []) {
+async function setup(page, extra = [], before) {
   await page.setViewportSize({ width: 402, height: 874 });
   const state = {
     chats: [
@@ -97,6 +97,7 @@ async function setup(page, extra = []) {
   await page.routeWebSocket('**/api/chat/ws', ws => {
     state.ws = ws;
   });
+  await before?.(page, state);
   await page.goto('/native/');
   await page.getByText('chat', { exact: true }).first().click();
   const app = page.locator('#remote-chat-app');
@@ -520,4 +521,138 @@ test('a pasted image attaches, and sending waits for uploads', async ({ page }) 
   // The new chat shows its file at once, then as the host saved it.
   await expect(app.locator('.chat-message.user .chat-attachment')).toHaveText('image.png');
   await expect(app.locator('.chat-title')).toHaveText('Which plant?');
+});
+
+// A microphone that records at once and a host that transcribes it, as in the dictation specs.
+async function voice(page, state) {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator.mediaDevices, 'getUserMedia', {
+      value: async () => ({ getTracks: () => [{ stop() {} }] }),
+    });
+    window.MediaRecorder = class {
+      static isTypeSupported() {
+        return true;
+      }
+      constructor() {
+        this.state = 'inactive';
+        this.mimeType = 'audio/mp4';
+      }
+      start() {
+        this.state = 'recording';
+      }
+      stop() {
+        this.state = 'inactive';
+        queueMicrotask(() => {
+          this.ondataavailable({ data: new Blob(['audio']) });
+          this.onstop();
+        });
+      }
+    };
+    window.Audio = class {
+      constructor() {
+        this.paused = true;
+        this.source = '';
+      }
+      set src(value) {
+        this.source = value;
+        this.currentSrc = value;
+      }
+      get src() {
+        return this.source;
+      }
+      play() {
+        this.paused = false;
+        return Promise.resolve();
+      }
+      pause() {
+        this.paused = true;
+      }
+      removeAttribute() {
+        this.src = '';
+      }
+    };
+  });
+  await page.route('**/api/dictation', r =>
+    r.fulfill({
+      json:
+        r.request().method() === 'GET'
+          ? { available: true, provider: 'Voxtype' }
+          : { text: 'dictated words' },
+    })
+  );
+  await page.route('**/api/voice', r => r.fulfill({ json: { available: true } }));
+  state.replies = {};
+  state.spoken = [];
+  await page.route(/\/api\/chat\/[0-9a-f-]{36}\/response$/, r => {
+    const id = r.request().url().split('/').at(-2);
+    return r.fulfill({
+      json: { session: id, working: false, answer: null, paragraphs: [], ...state.replies[id] },
+    });
+  });
+  await page.route(/\/api\/chat\/[0-9a-f-]{36}\/speech$/, r => {
+    state.spoken.push({ id: r.request().url().split('/').at(-2), ...r.request().postDataJSON() });
+    return r.fulfill({ contentType: 'audio/wav', body: 'fixture audio' });
+  });
+}
+
+test('a tap on the microphone talks and sends; holding the big button reads replies aloud', async ({
+  page,
+}) => {
+  const { app, state } = await setup(page, [], voice);
+  await app.locator('.chat-row').click();
+  await expect(app.locator('.chat-title')).toHaveText('Dinner ideas');
+  state.replies[ID] = { answer: { id: 'old', text: 'Pasta is quick.' } };
+  const small = app.locator('.dictation-button');
+  const floating = app.locator('.herdr-voice-microphone');
+  const speaker = floating.locator('.herdr-voice-speaker');
+  // One tap records at once, and the big button sends it, replies kept silent.
+  await small.click();
+  await expect(floating).toHaveText('Send');
+  await expect(speaker).toBeHidden();
+  await page.screenshot({ path: 'artifacts/browser/chat-voice.png' });
+  await floating.click();
+  await expect
+    .poll(() => state.sent)
+    .toEqual([{ id: ID, text: 'dictated words', attachments: [], model: '', effort: '' }]);
+  await expect(app.locator('textarea.native-input')).toHaveValue('');
+  await expect(floating).toHaveText('Talk');
+  state.replies[ID] = { answer: { id: 'quiet', text: 'Rice works too.' } };
+  await page.waitForTimeout(2500);
+  expect(state.spoken).toEqual([]);
+  // Holding the big button reads the next reply aloud.
+  await floating.click({ delay: 650 });
+  await expect(speaker).toBeVisible();
+  await floating.click();
+  await floating.click();
+  await expect.poll(() => state.sent.length).toBe(2);
+  state.replies[ID] = {
+    answer: { id: 'loud', text: 'Tacos.' },
+    paragraphs: [{ id: 'loud', text: 'Tacos.' }],
+  };
+  await expect
+    .poll(() => state.spoken, { timeout: 6000 })
+    .toMatchObject([{ id: ID, response_id: 'loud' }]);
+  // Tapping the bar microphone turns Voice off.
+  await app.locator('.dictation-button').click();
+  await expect(floating).toBeHidden();
+});
+
+test('Voice started in a new chat keeps reading it once the host names it', async ({ page }) => {
+  const { app, state } = await setup(page, [], voice);
+  await app.getByRole('button', { name: 'New chat' }).click();
+  // Holding the bar microphone turns on Voice with replies read aloud.
+  await app.locator('.dictation-button').click({ delay: 650 });
+  const floating = app.locator('.herdr-voice-microphone');
+  await expect(floating.locator('.herdr-voice-speaker')).toBeVisible();
+  await floating.click();
+  await floating.click();
+  await expect
+    .poll(() => state.sent)
+    .toEqual([{ id: null, text: 'dictated words', attachments: [], model: '', effort: '' }]);
+  await expect(app.locator('.chat-title')).toHaveText('dictated words');
+  await expect(floating).toBeVisible();
+  state.replies[NEW] = { paragraphs: [{ id: 'first', text: 'Hello there.' }], working: true };
+  await expect
+    .poll(() => state.spoken, { timeout: 6000 })
+    .toMatchObject([{ id: NEW, response_id: 'first' }]);
 });

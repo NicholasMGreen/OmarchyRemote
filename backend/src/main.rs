@@ -579,6 +579,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/chat/{id}", get(chat::read))
         .route("/api/chat/{id}/stop", post(chat::stop))
         .route("/api/chat/{id}/attachments/{name}", get(chat::attachment))
+        .route("/api/chat/{id}/response", get(chat::response))
+        .route("/api/chat/{id}/speech", post(chat::speech))
         .route("/api/voice", get(voice::status))
         .route("/api/herdr/panes/{id}/response", get(voice::response))
         .route("/api/herdr/panes/{id}/speech", post(voice::audio))

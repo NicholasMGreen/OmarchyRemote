@@ -84,8 +84,8 @@
       listBar.append(this.heading, this.selectButton, this.cancelSelect, this.newButton);
       // Selecting several chats offers Archive and Delete; Delete asks to confirm first.
       this.selected = new Set();
-      this.actions = node('div', 'chat-actions');
-      this.actions.hidden = true;
+      this.actionBar = node('div', 'chat-actions');
+      this.actionBar.hidden = true;
       this.actionText = node('span', 'chat-actions-text');
       this.archiveButton = button('Archive', () => this.archive(), 'remote-button');
       this.deleteButton = button(
@@ -96,7 +96,7 @@
       this.keepButton = button('Keep', () => this.confirmDelete(false), 'remote-button');
       this.confirmButton = button('Delete', () => this.remove(), 'remote-button chat-danger');
       this.confirmButton.setAttribute('aria-label', 'Delete permanently');
-      this.actions.append(
+      this.actionBar.append(
         this.actionText,
         this.archiveButton,
         this.deleteButton,
@@ -114,7 +114,7 @@
       );
       this.empty.hidden = true;
       this.listStatus = node('p', 'remote-status chat-folder');
-      this.listView.append(listBar, this.list, this.empty, this.actions, this.listStatus);
+      this.listView.append(listBar, this.list, this.empty, this.actionBar, this.listStatus);
 
       this.threadView = node('section', 'chat-thread-view');
       this.threadView.hidden = true;
@@ -184,10 +184,16 @@
       this.tray = node('div', 'chat-uploads');
       this.tray.setAttribute('aria-label', 'Attachments');
       this.tray.hidden = true;
+      // Like Herdr's output, the conversation's stage holds Voice's floating controls.
+      this.stage = node('div', 'herdr-output-stage chat-stage');
+      this.voiceTools = node('div', 'herdr-output-tools chat-voice-tools');
+      this.voiceTools.onpointerdown = e => e.preventDefault();
+      this.voiceTools.onclick = e => e.stopPropagation();
+      this.stage.append(this.messages, this.voiceTools);
       this.threadView.append(
         threadBar,
         this.settingsPanel,
-        this.messages,
+        this.stage,
         this.status,
         this.tray,
         this.promptRow
@@ -214,6 +220,32 @@
       });
       // Images in messages come from the host with the client header, so they load as blobs.
       this.images = new Map();
+      // The microphone works as in Herdr: tap to talk and send, hold for replies read aloud.
+      this.dictation = new HyprlandDictation(
+        this.nativeInput,
+        () => (this.chat && !this.threadView.hidden ? this.chat.id || 'new' : null),
+        this.stage,
+        this.voiceTools,
+        {
+          group: 'Chat',
+          changed: () => this.voiceChanged(),
+          endpoints: {
+            latest: async (voice, id) =>
+              id === 'new'
+                ? { session: 'new', answer: null, updates: [], paragraphs: [] }
+                : (await voice.request(`/api/chat/${encodeURIComponent(id)}/response`)).json(),
+            speech: id => `/api/chat/${encodeURIComponent(id)}/speech`,
+            // A recording sends like a typed message, with any files waiting to go.
+            send: async (voice, id) => {
+              const sent =
+                id === (this.chat?.id || 'new') && this.send(voice.dictation.input.draft);
+              if (!(await sent)) throw Error('Not sent');
+            },
+          },
+        }
+      );
+      this.promptRow.append(this.dictation.control);
+      this.voiceChanged();
       // Chat is always a message: no terminal keys, and tapping the conversation hides the
       // keyboard, so the composer needs no header row.
       this.nativeInput.header.hidden = true;
@@ -387,8 +419,8 @@
       this.heading.textContent = this.selecting ? `${count} selected` : 'Chats';
       this.cancelSelect.hidden = !this.selecting;
       this.newButton.hidden = !!this.selecting;
-      this.actions.hidden = !this.selecting;
-      this.actions.classList.toggle('confirming', !!this.confirming);
+      this.actionBar.hidden = !this.selecting;
+      this.actionBar.classList.toggle('confirming', !!this.confirming);
       this.actionText.textContent = this.confirming
         ? `Delete ${count} ${chats} permanently?`
         : count
@@ -430,7 +462,23 @@
       this.nativeInput.dismiss();
       this.threadView.hidden = true;
       this.listView.hidden = false;
+      this.followVoice();
       this.refresh();
+    }
+    // Voice mode stays on from chat to chat, following the one open; a new chat that the host
+    // has just named is the same conversation.
+    followVoice() {
+      const target = this.dictation.getTarget();
+      if (target === this.voiceTarget) return;
+      const named = this.voiceTarget === 'new' && target && target === this.named;
+      this.voiceTarget = target;
+      if (named) this.dictation.voice.retarget(target);
+      else this.dictation.voice.changeThread();
+    }
+    voiceChanged() {
+      const voice = this.dictation?.voice;
+      if (!voice) return;
+      this.voiceTools.hidden = !voice.enabled && !voice.loading && voice.stop.hidden;
     }
     showThread() {
       this.toggleSettings(false);
@@ -438,6 +486,7 @@
       this.listView.hidden = true;
       this.threadView.hidden = false;
       this.nativeInput.select(this.chat.id || 'new');
+      this.followVoice();
       this.nativeInput.field.placeholder = 'Message Claude…';
       this.following = true;
       this.uploadError = '';
@@ -492,6 +541,7 @@
       }
       const files = this.pending.get(draft) || [];
       if (!text && !files.length) return false;
+      if (!chat.id) this.named = null;
       this.setPending(draft, []);
       if (!chat.id) {
         // Events for the new chat arrive before its id does; hold them until it opens.
@@ -506,7 +556,7 @@
         chat.busy = true;
         this.render();
       }
-      request('/send', {
+      return request('/send', {
         id: chat.id,
         text,
         attachments: files.map(f => f.path),
@@ -515,7 +565,11 @@
       })
         .then(({ id }) => {
           // A new chat learns its id here; its state so far comes from the host.
-          if (!chat.id && this.chat === chat) this.open(id);
+          if (!chat.id && this.chat === chat) {
+            this.named = id;
+            this.open(id);
+          }
+          return true;
         })
         .catch(e => {
           if (!chat.id) this.buffer = null;
@@ -533,6 +587,7 @@
             chat.error = e.message;
             this.render();
           }
+          return false;
         });
     }
     setPending(draft, files) {
@@ -817,12 +872,20 @@
     show(visible) {
       if (visible && this.chat) this.renderState();
     }
-    // The composer replaces the prompt row and adopts the paperclip.
+    // The composer replaces the prompt row and adopts the paperclip and microphone.
     placeLatest() {
       const composing = !this.nativeInput.element.hidden;
       this.promptRow.hidden = composing;
-      if (composing) this.nativeInput.row.insertBefore(this.attachButton, this.nativeInput.field);
-      else this.promptRow.prepend(this.attachButton);
+      if (composing) {
+        this.nativeInput.row.insertBefore(this.attachButton, this.nativeInput.field);
+        this.nativeInput.row.insertBefore(this.dictation.control, this.nativeInput.field);
+      } else {
+        this.promptRow.prepend(this.attachButton);
+        this.promptRow.append(this.dictation.control);
+      }
+    }
+    get actions() {
+      return this.chat && !this.threadView.hidden ? this.dictation.actions : [];
     }
     dispose() {
       this.disposed = true;
@@ -831,6 +894,7 @@
       clearTimeout(this.listTimer);
       this.ws?.close();
       this.uploadAbort.abort();
+      this.dictation.dispose();
       for (const url of this.previews.values()) URL.revokeObjectURL(url);
       for (const url of this.images.values())
         url.then(

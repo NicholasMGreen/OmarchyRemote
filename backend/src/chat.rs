@@ -1188,6 +1188,66 @@ fn message_content(text: &str, folder: &FsPath, attachments: &[String]) -> Value
     json!(blocks)
 }
 
+/// Where a chat's Claude session log is, and whether a reply is in progress.
+fn session_log(app: &App, id: &str) -> anyhow::Result<(PathBuf, bool)> {
+    let (session, path, busy) = match app.chats.get(id) {
+        Some(running) => {
+            let live = running.live.lock().unwrap();
+            (
+                live.conversation.session.clone(),
+                live.path.clone(),
+                live.busy,
+            )
+        }
+        None => {
+            let path = find(&root()?, id)?;
+            (load(&path)?.session, path, false)
+        }
+    };
+    let folder = path.parent().unwrap_or(&path);
+    let log = claude_files(&claude_config()?, folder, &session)?.remove(0);
+    Ok((log, busy))
+}
+/// The latest reply's prose in the shape Herdr's Voice mode reads: `session`, `answer`, its
+/// `paragraphs` as they arrive, and whether Claude is `working`.
+async fn voice_state(app: &App, id: &str) -> anyhow::Result<Value> {
+    let (log, busy) = session_log(app, id)?;
+    let session = log
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let mut value = tokio::task::spawn_blocking(move || {
+        // A chat whose first reply has not started has no log yet.
+        if log.is_file() {
+            crate::voice::claude_answer(&log)
+        } else {
+            Ok(json!({"answer":null,"updates":[],"paragraphs":[],"working":false}))
+        }
+    })
+    .await??;
+    value["session"] = json!(session);
+    value["can_send"] = json!(true);
+    if busy {
+        value["working"] = json!(true);
+    }
+    Ok(value)
+}
+pub async fn response(
+    State(app): State<App>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(voice_state(&app, &id).await.map_err(error)?))
+}
+pub async fn speech(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(request): Json<crate::voice::SpeechRequest>,
+) -> Result<Response, ApiError> {
+    let value = voice_state(&app, &id).await.map_err(error)?;
+    crate::voice::speak(&value, request).await
+}
+
 /// A chat's attachment, for the app to show: `name` must be a file in its `attachments` folder.
 pub async fn attachment(
     State(app): State<App>,

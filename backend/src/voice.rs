@@ -892,6 +892,14 @@ pub async fn audio(
     Json(request): Json<SpeechRequest>,
 ) -> Result<Response, ApiError> {
     let value = latest(&app, &pane).await.map_err(error)?;
+    speak(&value, request).await
+}
+/// A Claude Code session log's latest reply prose, for Chat's Voice mode.
+pub fn claude_answer(path: &FsPath) -> anyhow::Result<Value> {
+    read_answer("claude", path)
+}
+/// Speaks messages of `value`, a transcript's latest prose, by their ids.
+pub async fn speak(value: &Value, request: SpeechRequest) -> Result<Response, ApiError> {
     let ids = if request.response_ids.is_empty() {
         vec![request.response_id]
     } else {
@@ -902,7 +910,7 @@ pub async fn audio(
     }
     let mut messages = Vec::new();
     for id in &ids {
-        let Some(message) = speech_message(&value, id) else {
+        let Some(message) = speech_message(value, id) else {
             return Err((
                 StatusCode::CONFLICT,
                 Json(json!({"error":"The response changed; read the latest answer"})),

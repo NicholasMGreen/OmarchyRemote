@@ -1,6 +1,6 @@
 # Dictation
 
-In an open Herdr pane, press **Command+Control+X** to record; press again to transcribe
+In an open Herdr pane or chat, press **Command+Control+X** to record; press again to transcribe
 (tapping the microphone starts a quiet Voice mode instead; see below). Escape discards the recording. The transcript appends
 to that pane's saved draft, preserving edits made while waiting. It never sends
 terminal input automatically. Settings shows the connected host's provider status.
@@ -70,7 +70,7 @@ a recording also stops playback. If the device blocks automatic audio, **Play
 answer** starts the ready recording explicitly.
 
 Voice mode starts from the current conversation position and speaks new assistant text only. It skips existing messages when enabled, reads completed paragraphs while the agent works, and reads any remaining prose as it becomes available without repeating paragraphs at turn completion. Read still replays the latest completed answer. Pending progress belongs to the current turn and is discarded when a new turn or thread replaces it.
-Voice mode belongs to the Herdr view, not individual threads. Switching threads (including through the pane list) or changing the underlying agent session keeps Voice enabled but stops playback and leaves automatic readback silent. Read can replay the latest completed answer; sending a new voice message resumes automatic readback for new text. Unsupported threads pause voice with an explanation; selecting a supported thread resumes it. Switching cancels recording and pending transcription without inserting or sending them to either thread. Existing
+Chat has the same microphone and Voice mode: each chat is a thread, recordings send as chat messages, and replies come from the chat's Claude session log. A new chat started by voice stays followed once the host names it. Voice mode belongs to the Herdr or Chat view, not individual threads. Switching threads (including through the pane list) or changing the underlying agent session keeps Voice enabled but stops playback and leaves automatic readback silent. Read can replay the latest completed answer; sending a new voice message resumes automatic readback for new text. Unsupported threads pause voice with an explanation; selecting a supported thread resumes it. Switching cancels recording and pending transcription without inserting or sending them to either thread. Existing
 drafts and edits during transcription leave the transcript in the
 composer for manual sending. Busy agents accept voice messages through the same input path as normal Send and manage their own queue; voice does not stop at a busy-agent draft dialog. A failed or uncertain send keeps the draft and is
 never automatically retried. Voice mode is opt-in for the current view, not a saved
