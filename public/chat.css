@@ -480,3 +480,118 @@
   font-size: 11px;
   color: var(--theme-secondary);
 }
+.chat-attach svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+}
+/* Files waiting to be sent with the next message. */
+.chat-uploads {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 2px 0;
+}
+.chat-upload {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(50% - 3px);
+  height: 36px;
+  padding: 0 2px 0 4px;
+  border: 1px solid var(--theme-border);
+  border-radius: 10px;
+  background: var(--theme-surface-raised);
+  font-size: 11px;
+}
+.chat-upload img {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  object-fit: cover;
+}
+.chat-upload > svg,
+.chat-attachment svg {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0 4px;
+  fill: none;
+  stroke: var(--theme-secondary);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.chat-upload-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-upload.uploading {
+  padding-right: 10px;
+  color: var(--theme-secondary);
+  animation: chat-thinking 1.4s ease-in-out infinite;
+}
+.chat-upload .chat-upload-remove {
+  width: 30px;
+  height: 30px;
+  border: 0;
+  background: transparent;
+  color: var(--theme-secondary);
+}
+.chat-upload .chat-upload-remove svg {
+  width: 14px;
+  height: 14px;
+}
+.chat-upload-error {
+  width: 100%;
+  margin: 0;
+  font-size: 11px;
+  color: var(--theme-red);
+}
+.chat-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.chat-attachments + .chat-message-text {
+  display: block;
+  margin-top: 6px;
+}
+.chat-attachment {
+  display: flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 6px 10px 6px 4px;
+  border: 1px solid var(--theme-border);
+  border-radius: 10px;
+  background: var(--theme-surface);
+  color: var(--theme-foreground);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.chat-attachment span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-attachment.image {
+  padding: 0;
+  overflow: hidden;
+}
+.chat-attachment.image img {
+  display: block;
+  min-width: 48px;
+  min-height: 48px;
+  max-width: min(220px, 100%);
+  max-height: 220px;
+  object-fit: cover;
+}

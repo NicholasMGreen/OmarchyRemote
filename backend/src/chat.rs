@@ -10,7 +10,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::StatusCode,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -46,6 +46,8 @@ struct Entry {
     /// The tool's name; empty for messages.
     name: String,
     text: String,
+    /// Files sent with a message, relative to the chat's folder, such as `attachments/photo.jpg`.
+    attachments: Vec<String>,
 }
 impl Entry {
     fn new(role: &str, name: &str, text: &str) -> Self {
@@ -54,11 +56,27 @@ impl Entry {
             time: now(),
             name: name.into(),
             text: text.into(),
+            attachments: Vec::new(),
         }
     }
     fn json(&self) -> Value {
-        json!({"role":self.role,"time":self.time,"name":self.name,"text":self.text})
+        json!({"role":self.role,"time":self.time,"name":self.name,"text":self.text,"attachments":self.attachments})
     }
+}
+/// An attachment written as a Markdown link (an image for pictures), so `chat.md` shows it.
+fn attachment_link(path: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let image = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".heif"]
+        .iter()
+        .any(|x| name.to_ascii_lowercase().ends_with(x));
+    format!("{}[{name}](<{path}>)", if image { "!" } else { "" })
+}
+/// The attachment a line written by `attachment_link` names.
+fn attachment_path(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix('!').unwrap_or(line).strip_prefix('[')?;
+    let (_, target) = rest.split_once("](<")?;
+    let path = target.strip_suffix(">)")?;
+    (path.starts_with("attachments/") && !path.contains(['>', '\n'])).then_some(path)
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -77,12 +95,14 @@ struct Conversation {
 }
 impl Conversation {
     fn preview(&self) -> String {
-        let text = self
-            .entries
-            .iter()
-            .rev()
-            .find(|e| e.role != "tool")
-            .map(|e| e.text.as_str())
+        let last = self.entries.iter().rev().find(|e| e.role != "tool");
+        let attached = last
+            .filter(|e| e.text.is_empty())
+            .and_then(|e| e.attachments.first())
+            .map(|path| format!("📎 {}", path.rsplit('/').next().unwrap_or(path)));
+        let text = attached
+            .as_deref()
+            .or(last.map(|e| e.text.as_str()))
             .unwrap_or_default();
         clip(&text.split_whitespace().collect::<Vec<_>>().join(" "), 160)
     }
@@ -148,6 +168,15 @@ impl Conversation {
                 out.push_str(line);
                 out.push('\n');
             }
+            if !entry.attachments.is_empty() {
+                if !entry.text.is_empty() {
+                    out.push('\n');
+                }
+                for path in &entry.attachments {
+                    out.push_str(&attachment_link(path));
+                    out.push('\n');
+                }
+            }
         }
         out
     }
@@ -188,6 +217,14 @@ impl Conversation {
                 while lines.last() == Some(&"") {
                     lines.pop();
                 }
+                // A message's attachments are the links that end it.
+                while let Some(path) = lines.last().and_then(|l| attachment_path(l)) {
+                    entry.attachments.insert(0, path.to_owned());
+                    lines.pop();
+                }
+                while lines.last() == Some(&"") {
+                    lines.pop();
+                }
                 entry.text = lines
                     .iter()
                     .map(|l| {
@@ -216,6 +253,7 @@ impl Conversation {
                             time: time.into(),
                             name: name.into(),
                             text: String::new(),
+                            attachments: Vec::new(),
                         },
                         Vec::new(),
                     ));
@@ -878,18 +916,38 @@ pub struct Send {
     model: Option<String>,
     #[serde(default)]
     effort: Option<String>,
+    /// Paths returned by `/api/uploads/files`, moved into the chat's folder when sent.
+    #[serde(default)]
+    attachments: Vec<String>,
 }
 pub async fn send(
     State(app): State<App>,
     Json(request): Json<Send>,
 ) -> Result<Json<Value>, ApiError> {
     let text = request.text.trim().to_owned();
-    if text.is_empty() || text.len() > MAX_TEXT {
+    if (text.is_empty() && request.attachments.is_empty())
+        || text.len() > MAX_TEXT
+        || request.attachments.len() > 20
+    {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(json!({"error":"The message is empty or longer than 64 KiB"})),
+            Json(
+                json!({"error":"The message is empty, longer than 64 KiB, or has more than 20 files"}),
+            ),
         ));
     }
+    // Only files uploaded through Omarchy Remote can be attached, never other host files.
+    let uploads: Vec<PathBuf> = request
+        .attachments
+        .iter()
+        .map(|path| uploaded(FsPath::new(path)))
+        .collect::<anyhow::Result<_>>()
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error":e.to_string()})),
+            )
+        })?;
     if !valid_settings(
         request.model.as_deref().unwrap_or_default(),
         request.effort.as_deref().unwrap_or_default(),
@@ -940,7 +998,10 @@ pub async fn send(
                 }
                 (None, _) => {
                     let id = uuid::Uuid::new_v4().to_string();
-                    let title = title(&text);
+                    let title = match (text.is_empty(), uploads.first()) {
+                        (true, Some(upload)) => original_name(upload),
+                        _ => title(&text),
+                    };
                     let created = now();
                     let name = format!("{}-{}-{}", &created[..10], slug(&title), &id[..8]);
                     let path = new_dir(&root, &name).map_err(error)?.join(FILE);
@@ -979,9 +1040,16 @@ pub async fn send(
             chats.spawn(live, resume, &root).map_err(error)?
         }
     };
-    let (id, events) = {
+    let (id, events, content) = {
         let mut live = running.live.lock().unwrap();
-        let entry = Entry::new("user", "", &text);
+        let mut entry = Entry::new("user", "", &text);
+        let folder = live.path.parent().unwrap_or(&root).to_owned();
+        for upload in &uploads {
+            entry
+                .attachments
+                .push(attach(&folder, upload).map_err(error)?);
+        }
+        let content = message_content(&text, &folder, &entry.attachments);
         let id = live.conversation.id.clone();
         let mut events = vec![
             json!({"type":"entry","id":id,"index":live.conversation.entries.len(),"entry":entry.json()}),
@@ -993,10 +1061,11 @@ pub async fn send(
         live.busy = true;
         live.used = Instant::now();
         save(&live.conversation, &live.path).map_err(error)?;
-        (id, events)
+        (id, events, content)
     };
     chats.emit(events);
-    let line = json!({"type":"user","message":{"role":"user","content":text}}).to_string() + "\n";
+    let line =
+        json!({"type":"user","message":{"role":"user","content":content}}).to_string() + "\n";
     let mut stdin = running.stdin.lock().await;
     if let Err(e) = stdin.write_all(line.as_bytes()).await {
         drop(stdin);
@@ -1004,6 +1073,157 @@ pub async fn send(
         return Err(error(format!("The agent is not running: {e}")));
     }
     Ok(Json(json!({"id":id})))
+}
+
+/// An upload's real path, which must be a file in the uploads folder.
+fn uploaded(path: &FsPath) -> anyhow::Result<PathBuf> {
+    uploaded_in(&crate::uploads::directory()?, path)
+}
+fn uploaded_in(uploads: &FsPath, path: &FsPath) -> anyhow::Result<PathBuf> {
+    let uploads = uploads.canonicalize()?;
+    let path = path
+        .canonicalize()
+        .map_err(|_| anyhow::anyhow!("An attachment is no longer on the host; attach it again"))?;
+    anyhow::ensure!(
+        path.starts_with(&uploads) && path.is_file(),
+        "Only uploaded files can be attached"
+    );
+    Ok(path)
+}
+/// The name a file was uploaded with: uploads are stored as `<uuid>-<name>`.
+fn original_name(upload: &FsPath) -> String {
+    let name = upload.file_name().unwrap_or_default().to_string_lossy();
+    match name.split_at_checked(37) {
+        Some((id, rest)) if uuid::Uuid::parse_str(&id[..36]).is_ok() && id.ends_with('-') => {
+            rest.to_owned()
+        }
+        _ => name.into_owned(),
+    }
+}
+/// Moves an upload into the chat's `attachments` folder (numbered if the name is taken) and
+/// returns its path relative to the chat folder.
+fn attach(folder: &FsPath, upload: &FsPath) -> anyhow::Result<String> {
+    let dir = folder.join("attachments");
+    private_dir(&dir)?;
+    let name = original_name(upload);
+    let (stem, extension) = match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => (stem.to_owned(), format!(".{extension}")),
+        _ => (name.clone(), String::new()),
+    };
+    let mut target = dir.join(&name);
+    let mut copy = 2;
+    while fs::symlink_metadata(&target).is_ok() {
+        target = dir.join(format!("{stem}-{copy}{extension}"));
+        copy += 1;
+    }
+    if fs::rename(upload, &target).is_err() {
+        fs::copy(upload, &target)?;
+        fs::remove_file(upload)?;
+    }
+    fs::set_permissions(&target, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+    Ok(format!(
+        "attachments/{}",
+        target.file_name().unwrap_or_default().to_string_lossy()
+    ))
+}
+/// The image formats Claude reads directly, by signature.
+fn image_media(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+fn base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | u32::from(*b) << (16 - 8 * i));
+        for i in 0..4 {
+            out.push(if i <= chunk.len() {
+                TABLE[(n >> (18 - 6 * i) & 63) as usize] as char
+            } else {
+                '='
+            });
+        }
+    }
+    out
+}
+/// Claude's message: images it can read go in as images (up to the API's 5 MB once encoded), and
+/// every attachment is named by its path in the chat folder, where Claude runs.
+fn message_content(text: &str, folder: &FsPath, attachments: &[String]) -> Value {
+    if attachments.is_empty() {
+        return json!(text);
+    }
+    let mut blocks = Vec::new();
+    let mut list = String::new();
+    for path in attachments {
+        list.push_str("\n- ");
+        list.push_str(path);
+        let Ok(bytes) = fs::read(folder.join(path)) else {
+            continue;
+        };
+        // Pictures the API accepts go inline, so Claude need not read them again.
+        if let Some(media) = image_media(&bytes).filter(|_| bytes.len() <= 3_750_000) {
+            blocks.push(json!({"type":"image","source":{"type":"base64","media_type":media,"data":base64(&bytes)}}));
+            list.push_str(" (shown above)");
+        }
+    }
+    let note = format!("Attached files, in this chat's folder:{list}");
+    let text = if text.is_empty() {
+        note
+    } else {
+        format!("{text}\n\n{note}")
+    };
+    blocks.push(json!({"type":"text","text":text}));
+    json!(blocks)
+}
+
+/// A chat's attachment, for the app to show: `name` must be a file in its `attachments` folder.
+pub async fn attachment(
+    State(app): State<App>,
+    Path((id, name)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let missing = || {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"Attachment not found"})),
+        )
+    };
+    if name.is_empty() || name.contains(['/', '\\']) || name.starts_with('.') {
+        return Err(missing());
+    }
+    let path = match app.chats.get(&id) {
+        Some(running) => running.live.lock().unwrap().path.clone(),
+        None => {
+            let root = root().map_err(error)?;
+            find(&root, &id).map_err(|_| missing())?
+        }
+    };
+    let file = path.with_file_name("attachments").join(&name);
+    let meta = fs::symlink_metadata(&file).map_err(|_| missing())?;
+    if !meta.is_file() {
+        return Err(missing());
+    }
+    let bytes = tokio::fs::read(&file).await.map_err(error)?;
+    let kind = image_media(&bytes).unwrap_or("application/octet-stream");
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, kind),
+            (axum::http::header::CACHE_CONTROL, "private, max-age=3600"),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 /// Stops the agent mid-reply. Its session keeps everything up to the last complete message, and
@@ -1251,13 +1471,14 @@ mod tests {
             created: "2026-10-03T10:00:00Z".into(),
             updated: "2026-10-03T10:01:00Z".into(),
             entries: vec![
-                Entry { role: "user".into(), time: "2026-10-03T10:00:00Z".into(), name: String::new(), text: "Ideas for dinner?\n\nSomething quick.".into() },
-                Entry { role: "tool".into(), time: "2026-10-03T10:00:02Z".into(), name: "WebSearch".into(), text: "quick dinner recipes".into() },
+                Entry { role: "user".into(), time: "2026-10-03T10:00:00Z".into(), name: String::new(), text: "Ideas for dinner?\n\nSomething quick.".into(), attachments: vec!["attachments/fridge.jpg".into(), "attachments/menu plan.pdf".into()] },
+                Entry { role: "tool".into(), time: "2026-10-03T10:00:02Z".into(), name: "WebSearch".into(), text: "quick dinner recipes".into(), attachments: Vec::new() },
                 Entry {
                     role: "assistant".into(),
                     time: "2026-10-03T10:00:05Z".into(),
                     name: String::new(),
                     text: "**Pasta** is quick.\n\n```\n<!-- omarchy-chat:user 2026 -->\n  <!-- omarchy-chat:tool x y -->\n```\n**You**".into(),
+                    attachments: Vec::new(),
                 },
             ],
         }
@@ -1270,6 +1491,7 @@ mod tests {
         assert!(markdown.starts_with("---\nid: \"1b8ab544-8cc5-430e-8a40-0aec58bc3b10\"\n"));
         assert!(markdown.contains("**You**\n\nIdeas for dinner?"));
         assert!(markdown.contains("> quick dinner recipes"));
+        assert!(markdown.contains("Something quick.\n\n![fridge.jpg](<attachments/fridge.jpg>)\n[menu plan.pdf](<attachments/menu plan.pdf>)\n"));
         // Marker-like lines in a message cannot start a new entry.
         assert_eq!(markdown.matches(&format!("\n{MARK}")).count(), 3);
         assert_eq!(Conversation::parse(&markdown).unwrap(), conversation);
@@ -1302,6 +1524,71 @@ mod tests {
             (conversation.model.as_str(), conversation.effort.as_str()),
             ("", "")
         );
+    }
+
+    #[test]
+    fn attachments_are_uploads_moved_into_the_chat_and_sent_as_images() {
+        assert_eq!(base64(b""), "");
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+        assert_eq!(base64(&[0xfb, 0xff]), "+/8=");
+        let dir = crate::dictation::AudioDir::new().unwrap();
+        let uploads = dir.0.join("uploads");
+        fs::create_dir(&uploads).unwrap();
+        let png = b"\x89PNG\r\n\x1a\nrest of image".to_vec();
+        let photo = uploads.join("0b8ab544-8cc5-430e-8a40-0aec58bc3b10-photo.png");
+        fs::write(&photo, &png).unwrap();
+        let notes = uploads.join("1c8ab544-8cc5-430e-8a40-0aec58bc3b10-notes.txt");
+        fs::write(&notes, "notes").unwrap();
+        assert_eq!(original_name(&photo), "photo.png");
+        assert_eq!(
+            original_name(&uploads.join("image-abc.png")),
+            "image-abc.png"
+        );
+        // Only files in the uploads folder can be attached.
+        assert_eq!(
+            uploaded_in(&uploads, &photo).unwrap(),
+            photo.canonicalize().unwrap()
+        );
+        let outside = dir.0.join("secret.txt");
+        fs::write(&outside, "secret").unwrap();
+        assert!(uploaded_in(&uploads, &outside).is_err());
+        assert!(uploaded_in(&uploads, &uploads.join("../secret.txt")).is_err());
+        assert!(uploaded_in(&uploads, &uploads).is_err());
+        let chat = dir.0.join("chat");
+        fs::create_dir(&chat).unwrap();
+        fs::write(chat.join("ignored"), "").unwrap();
+        assert_eq!(attach(&chat, &photo).unwrap(), "attachments/photo.png");
+        assert!(!photo.exists());
+        // The same name again is numbered rather than replacing the first.
+        fs::write(&photo, &png).unwrap();
+        assert_eq!(attach(&chat, &photo).unwrap(), "attachments/photo-2.png");
+        assert_eq!(attach(&chat, &notes).unwrap(), "attachments/notes.txt");
+        let content = message_content(
+            "What is this?",
+            &chat,
+            &[
+                "attachments/photo.png".into(),
+                "attachments/notes.txt".into(),
+            ],
+        );
+        assert_eq!(content[0]["type"], "image");
+        assert_eq!(content[0]["source"]["media_type"], "image/png");
+        assert_eq!(content[0]["source"]["data"], base64(&png));
+        assert_eq!(content.as_array().unwrap().len(), 2);
+        assert_eq!(
+            content[1]["text"],
+            "What is this?\n\nAttached files, in this chat's folder:\n- attachments/photo.png (shown above)\n- attachments/notes.txt"
+        );
+        assert_eq!(message_content("Plain", &chat, &[]), json!("Plain"));
+        // A photo sent without text is previewed by its name.
+        let mut conversation = sample();
+        conversation.entries.push(Entry {
+            attachments: vec!["attachments/photo.png".into()],
+            ..Entry::new("user", "", "")
+        });
+        assert_eq!(conversation.preview(), "📎 photo.png");
     }
 
     #[test]

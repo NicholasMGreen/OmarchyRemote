@@ -6,6 +6,9 @@
   const OPEN = 'omarchy-chat-open';
   // The model and effort chosen last; new chats start with them.
   const SETTINGS = 'omarchy-chat-settings';
+  // Files uploaded for each chat's next message, kept like its draft.
+  const ATTACHMENTS = 'omarchy-chat-attachments-v1';
+  const MAX_ATTACHMENTS = 20;
 
   async function request(path, body) {
     const response = await fetch(
@@ -34,6 +37,9 @@
     stop: 'M6 6h12v12H6Z',
     folder: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z',
     tool: 'M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.4-.6-.6-2.4Z',
+    attach: 'm8 13 7-7a3 3 0 0 1 4 4l-9 9a5 5 0 0 1-7-7l9-9m-6 12 9-9',
+    file: 'M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8Zm0 0v5h5',
+    close: 'M18 6 6 18M6 6l12 12',
   };
   function icon(name) {
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -148,12 +154,42 @@
       this.promptField.className = 'prompt-field herdr-prompt chat-prompt';
       this.promptField.setAttribute('aria-label', 'Write a message');
       this.promptField.append(node('span', 'chat-placeholder', 'Message Claude…'));
-      this.promptRow.append(this.promptField);
+      // Like Herdr: the paperclip offers the photo library and Files; pasted files attach too.
+      this.filePicker = node('input');
+      this.filePicker.type = 'file';
+      this.filePicker.multiple = true;
+      this.filePicker.hidden = true;
+      this.filePicker.onchange = () => {
+        const files = [...this.filePicker.files];
+        this.filePicker.value = '';
+        this.upload(files);
+      };
+      this.attachButton = button(
+        '',
+        () => {
+          this.nativeInput.field.blur();
+          this.filePicker.click();
+        },
+        'herdr-attach keycap chat-attach'
+      );
+      this.attachButton.setAttribute('aria-label', 'Attach files');
+      this.attachButton.title = 'Attach files';
+      this.attachButton.append(icon('attach'));
+      this.promptRow.append(this.attachButton, this.promptField, this.filePicker);
+      // Uploaded files wait here until the message is sent.
+      this.pending = new Map(Object.entries(storage.read(ATTACHMENTS, {}) || {}));
+      this.previews = new Map();
+      this.uploads = [];
+      this.uploadAbort = new AbortController();
+      this.tray = node('div', 'chat-uploads');
+      this.tray.setAttribute('aria-label', 'Attachments');
+      this.tray.hidden = true;
       this.threadView.append(
         threadBar,
         this.settingsPanel,
         this.messages,
         this.status,
+        this.tray,
         this.promptRow
       );
       root.append(this.listView, this.threadView);
@@ -166,6 +202,18 @@
         dismissOnSend: true,
         draftStore: 'omarchy-chat-drafts-v1',
       });
+      this.nativeInput.field.addEventListener('paste', e => {
+        const files = [...(e.clipboardData?.items || [])]
+          .filter(i => i.kind === 'file')
+          .map(i => i.getAsFile())
+          .filter(Boolean);
+        if (files.length) {
+          e.preventDefault();
+          this.upload(files);
+        }
+      });
+      // Images in messages come from the host with the client header, so they load as blobs.
+      this.images = new Map();
       // Chat is always a message: no terminal keys, and tapping the conversation hides the
       // keyboard, so the composer needs no header row.
       this.nativeInput.header.hidden = true;
@@ -392,6 +440,8 @@
       this.nativeInput.select(this.chat.id || 'new');
       this.nativeInput.field.placeholder = 'Message Claude…';
       this.following = true;
+      this.uploadError = '';
+      this.renderTray();
       this.render();
     }
     startNew() {
@@ -432,20 +482,34 @@
     }
     send(text) {
       text = text.trim();
-      if (!text || !this.chat) return false;
+      if (!this.chat) return false;
       const chat = this.chat;
       const draft = chat.id || 'new';
+      if (this.uploads.some(u => u.draft === draft)) {
+        this.uploadError = 'Wait for the upload to finish.';
+        this.renderTray();
+        return false;
+      }
+      const files = this.pending.get(draft) || [];
+      if (!text && !files.length) return false;
+      this.setPending(draft, []);
       if (!chat.id) {
         // Events for the new chat arrive before its id does; hold them until it opens.
         this.buffer = [];
-        chat.title = text.split('\n')[0];
-        chat.entries.push({ role: 'user', text, time: new Date().toISOString() });
+        chat.title = text.split('\n')[0] || files[0].name;
+        chat.entries.push({
+          role: 'user',
+          text,
+          time: new Date().toISOString(),
+          attachments: files.map(f => 'attachments/' + f.name),
+        });
         chat.busy = true;
         this.render();
       }
       request('/send', {
         id: chat.id,
         text,
+        attachments: files.map(f => f.path),
         model: chat.model || '',
         effort: chat.effort || '',
       })
@@ -462,6 +526,7 @@
             input.configure();
           }
           input.storeDraft(draft, text);
+          this.setPending(draft, [...files, ...(this.pending.get(draft) || [])]);
           if (this.chat === chat) {
             if (!chat.id) chat.entries.pop();
             chat.busy = false;
@@ -469,6 +534,109 @@
             this.render();
           }
         });
+    }
+    setPending(draft, files) {
+      if (files.length) this.pending.set(draft, files);
+      else this.pending.delete(draft);
+      storage.write(ATTACHMENTS, Object.fromEntries(this.pending));
+      this.renderTray();
+    }
+    async upload(files) {
+      if (!this.chat || !files.length || this.disposed) return;
+      const draft = this.chat.id || 'new';
+      const errors = [];
+      for (const file of files) {
+        const name = file.name || 'file';
+        const waiting = (this.pending.get(draft) || []).length;
+        const sending = this.uploads.filter(u => u.draft === draft).length;
+        if (waiting + sending >= MAX_ATTACHMENTS) {
+          errors.push(`A message can carry ${MAX_ATTACHMENTS} files.`);
+          break;
+        }
+        if (file.size > 100 * 1024 * 1024) {
+          errors.push(name + ': larger than 100 MB');
+          continue;
+        }
+        if (!file.size) {
+          errors.push(name + ': empty file');
+          continue;
+        }
+        const job = { draft, name };
+        this.uploads.push(job);
+        this.renderTray();
+        try {
+          const response = await fetch('/api/uploads/files?name=' + encodeURIComponent(name), {
+            method: 'POST',
+            headers: {
+              'X-Hyprland-Client': '1',
+              'Content-Type': file.type || 'application/octet-stream',
+            },
+            body: file,
+            // Large files over Tailscale take a while; the limit is on bytes, not time.
+            signal: AbortSignal.any([this.uploadAbort.signal, AbortSignal.timeout(600000)]),
+          });
+          if (response.status === 413) throw Error('File is larger than 100 MB');
+          const result = await response.json().catch(() => ({}));
+          if (!response.ok || typeof result.path !== 'string')
+            throw Error(result.error || 'Upload failed');
+          if (result.kind === 'image') this.previews.set(result.path, URL.createObjectURL(file));
+          const upload = { path: result.path, name, kind: result.kind };
+          this.setPending(draft, [...(this.pending.get(draft) || []), upload]);
+        } catch (e) {
+          if (this.disposed) return;
+          errors.push(
+            name + ': ' + (e.name === 'TimeoutError' ? 'Upload timed out. Try again.' : e.message)
+          );
+        } finally {
+          this.uploads.splice(this.uploads.indexOf(job), 1);
+        }
+      }
+      if (this.disposed) return;
+      this.uploadError = errors.join(' · ');
+      this.renderTray();
+      // Back to the message, as after attaching in Herdr.
+      if (this.pending.get(draft)?.length && this.bridge.logic.cur() === 'chat')
+        this.bridge.keyboard();
+    }
+    removeUpload(draft, path) {
+      const url = this.previews.get(path);
+      if (url) URL.revokeObjectURL(url);
+      this.previews.delete(path);
+      this.setPending(
+        draft,
+        (this.pending.get(draft) || []).filter(f => f.path !== path)
+      );
+    }
+    renderTray() {
+      if (!this.chat) return;
+      const draft = this.chat.id || 'new';
+      const chips = (this.pending.get(draft) || []).map(file => {
+        const chip = node('div', 'chat-upload');
+        const preview = this.previews.get(file.path);
+        if (preview) {
+          const img = node('img');
+          img.src = preview;
+          img.alt = '';
+          chip.append(img);
+        } else chip.append(icon(file.kind === 'image' ? 'attach' : 'file'));
+        chip.append(node('span', 'chat-upload-name', file.name));
+        const remove = iconButton(
+          'close',
+          'Remove ' + file.name,
+          () => this.removeUpload(draft, file.path),
+          'chat-upload-remove'
+        );
+        chip.append(remove);
+        return chip;
+      });
+      for (const job of this.uploads.filter(u => u.draft === draft)) {
+        const chip = node('div', 'chat-upload uploading');
+        chip.append(icon('attach'), node('span', 'chat-upload-name', `Uploading ${job.name}…`));
+        chips.push(chip);
+      }
+      if (this.uploadError) chips.push(node('p', 'chat-upload-error', this.uploadError));
+      this.tray.replaceChildren(...chips);
+      this.tray.hidden = !chips.length;
     }
     // Model and effort apply from the next message; the host restarts the chat's agent for them.
     toggleSettings(open = this.settingsPanel.hidden) {
@@ -564,8 +732,61 @@
       }
       const message = node('div', 'chat-message ' + entry.role);
       if (entry.role === 'assistant') markdown(message, entry.text);
-      else message.textContent = entry.text;
+      else {
+        if (entry.attachments?.length) message.append(this.attachments(entry.attachments));
+        if (entry.text) message.append(node('span', 'chat-message-text', entry.text));
+      }
       return message;
+    }
+    // A message's files open in Files, in the chat's attachments folder.
+    attachments(paths) {
+      const list = node('div', 'chat-attachments');
+      const chat = this.chat;
+      const files = HyprlandApps.get('files')?.provider;
+      for (const path of paths) {
+        const name = path.split('/').pop();
+        const item = button(
+          '',
+          () => {
+            if (chat.folder && files?.openAt)
+              files.openAt(this.bridge, chat.folder + '/attachments');
+          },
+          'chat-attachment'
+        );
+        item.title = name;
+        item.setAttribute('aria-label', name);
+        if (chat.id && /\.(png|jpe?g|gif|webp)$/i.test(name)) {
+          item.classList.add('image');
+          const img = node('img');
+          img.alt = name;
+          img.onload = () => this.scroll();
+          item.append(img);
+          this.image(chat.id, name)
+            .then(url => (img.src = url))
+            .catch(() => item.replaceChildren(icon('file'), node('span', '', name)));
+        } else item.append(icon('file'), node('span', '', name));
+        list.append(item);
+      }
+      return list;
+    }
+    image(id, name) {
+      const key = id + '/' + name;
+      if (!this.images.has(key)) {
+        const url = fetch(
+          `/api/chat/${encodeURIComponent(id)}/attachments/${encodeURIComponent(name)}`,
+          {
+            headers: { 'X-Hyprland-Client': '1' },
+          }
+        )
+          .then(response => {
+            if (!response.ok) throw Error('Not found');
+            return response.blob();
+          })
+          .then(blob => URL.createObjectURL(blob));
+        url.catch(() => this.images.delete(key));
+        this.images.set(key, url);
+      }
+      return this.images.get(key);
     }
     renderPartial() {
       cancelAnimationFrame(this.frame);
@@ -596,8 +817,12 @@
     show(visible) {
       if (visible && this.chat) this.renderState();
     }
+    // The composer replaces the prompt row and adopts the paperclip.
     placeLatest() {
-      this.promptRow.hidden = !this.nativeInput.element.hidden;
+      const composing = !this.nativeInput.element.hidden;
+      this.promptRow.hidden = composing;
+      if (composing) this.nativeInput.row.insertBefore(this.attachButton, this.nativeInput.field);
+      else this.promptRow.prepend(this.attachButton);
     }
     dispose() {
       this.disposed = true;
@@ -605,6 +830,13 @@
       clearTimeout(this.retry);
       clearTimeout(this.listTimer);
       this.ws?.close();
+      this.uploadAbort.abort();
+      for (const url of this.previews.values()) URL.revokeObjectURL(url);
+      for (const url of this.images.values())
+        url.then(
+          u => URL.revokeObjectURL(u),
+          () => {}
+        );
       this.nativeInput.dispose();
     }
   }

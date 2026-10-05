@@ -61,7 +61,12 @@ async function setup(page, extra = []) {
       state.conversations[NEW] = {
         id: NEW,
         title: body.text,
-        entries: [entry('user', body.text)],
+        entries: [
+          {
+            ...entry('user', body.text),
+            attachments: body.attachments.map(path => 'attachments/' + path.split('/u-').pop()),
+          },
+        ],
         busy: true,
         partial: '',
         seq: 0,
@@ -128,7 +133,7 @@ test('a new chat streams its reply, shows tools, and can be stopped', async ({ p
   await field.press('Enter');
   await expect
     .poll(() => state.sent)
-    .toEqual([{ id: null, text: 'What is a pelican?', model: '', effort: '' }]);
+    .toEqual([{ id: null, text: 'What is a pelican?', attachments: [], model: '', effort: '' }]);
   // Sending hides the keyboard; the message box stand-in takes its place.
   await expect(field).toBeHidden();
   await expect(app.getByRole('button', { name: 'Write a message' })).toBeVisible();
@@ -329,7 +334,7 @@ test('model and effort are chosen per chat and remembered for new chats', async 
   await field.press('Enter');
   await expect
     .poll(() => state.sent)
-    .toEqual([{ id: null, text: 'Hello', model: 'opus', effort: 'xhigh' }]);
+    .toEqual([{ id: null, text: 'Hello', attachments: [], model: 'opus', effort: 'xhigh' }]);
   // The next new chat starts with the same choice.
   await app.getByRole('button', { name: 'New chat' }).click();
   await expect(chip).toHaveText('Opus · xhigh');
@@ -349,7 +354,7 @@ test('model and effort are chosen per chat and remembered for new chats', async 
   await field.press('Enter');
   await expect
     .poll(() => state.sent.at(-1))
-    .toEqual({ id: ID, text: 'Again', model: 'fable', effort: 'low' });
+    .toEqual({ id: ID, text: 'Again', attachments: [], model: 'fable', effort: 'low' });
 });
 
 test("a chat's folder opens in Files", async ({ page }) => {
@@ -392,4 +397,127 @@ test('raising the keyboard pushes the conversation up, keeping the latest messag
   await app.getByRole('button', { name: 'Write a message' }).click();
   await expect(app.locator('textarea.native-input')).toBeFocused();
   await expect.poll(fromBottom).toBe(before);
+});
+
+// A 1×1 PNG.
+const PIXEL = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64'
+);
+
+test('files attach to a message, send with it, and show in the conversation', async ({ page }) => {
+  const { app, state, emit } = await setup(page);
+  const uploads = [];
+  await page.route('**/api/uploads/files?*', r => {
+    const name = new URL(r.request().url()).searchParams.get('name');
+    uploads.push({ name, client: r.request().headers()['x-hyprland-client'] });
+    const kind = name.endsWith('.png') ? 'image' : 'file';
+    return r.fulfill({
+      json: { path: `/home/qa/.local/share/omarchy-remote/uploads/u-${name}`, kind },
+    });
+  });
+  const fetched = [];
+  await page.route(/\/api\/chat\/[0-9a-f-]{36}\/attachments\/.+$/, r => {
+    fetched.push({
+      name: decodeURIComponent(r.request().url().split('/').pop()),
+      client: r.request().headers()['x-hyprland-client'],
+    });
+    return r.fulfill({ body: PIXEL, contentType: 'image/png' });
+  });
+  await app.locator('.chat-row').click();
+  await expect(app.locator('.chat-title')).toHaveText('Dinner ideas');
+  await app.locator('input[type=file]').setInputFiles([
+    { name: 'fridge.png', mimeType: 'image/png', buffer: PIXEL },
+    { name: 'menu.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF') },
+  ]);
+  const tray = app.getByLabel('Attachments');
+  await expect(tray.locator('.chat-upload-name')).toHaveText(['fridge.png', 'menu.pdf']);
+  await expect(tray.locator('img')).toHaveCount(1);
+  await page.screenshot({ path: 'artifacts/browser/chat-uploads.png' });
+  expect(uploads).toEqual([
+    { name: 'fridge.png', client: '1' },
+    { name: 'menu.pdf', client: '1' },
+  ]);
+  // The upload returns to the message, and the composer takes over the paperclip.
+  const field = app.locator('textarea.native-input');
+  await expect(field).toBeFocused();
+  await expect(app.locator('.native-input-row .chat-attach')).toBeVisible();
+  await app.getByRole('button', { name: 'Remove menu.pdf' }).click();
+  await expect(tray.locator('.chat-upload-name')).toHaveText(['fridge.png']);
+  // Waiting files survive a reload, like the draft.
+  await page.reload();
+  await expect(app.getByLabel('Attachments').locator('.chat-upload-name')).toHaveText([
+    'fridge.png',
+  ]);
+  // A message can be only a file.
+  await app.getByRole('button', { name: 'Write a message' }).click();
+  await field.press('Enter');
+  await expect
+    .poll(() => state.sent)
+    .toEqual([
+      {
+        id: ID,
+        text: '',
+        attachments: ['/home/qa/.local/share/omarchy-remote/uploads/u-fridge.png'],
+        model: '',
+        effort: '',
+      },
+    ]);
+  await expect(app.getByLabel('Attachments')).toBeHidden();
+  emit({
+    type: 'entry',
+    id: ID,
+    index: 2,
+    entry: {
+      ...entry('user', 'What can I make?'),
+      attachments: ['attachments/fridge.png', 'attachments/notes.txt'],
+    },
+  });
+  const sent = app.locator('.chat-message.user').last();
+  await expect(sent.locator('.chat-message-text')).toHaveText('What can I make?');
+  await expect(sent.locator('.chat-attachment')).toHaveCount(2);
+  await expect(sent.locator('.chat-attachment.image img')).toHaveAttribute('src', /^blob:/);
+  await expect(sent.locator('.chat-attachment:not(.image)')).toHaveText('notes.txt');
+  expect(fetched).toEqual([{ name: 'fridge.png', client: '1' }]);
+  await page.screenshot({ path: 'artifacts/browser/chat-attachments.png' });
+  // Tapping one opens the chat's attachments folder in Files.
+  await sent.locator('.chat-attachment:not(.image)').click();
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem('omarchy-files-path')))
+    .toBe('/home/qa/Chats/2026-10-03-dinner-ideas-1b8ab544/attachments');
+});
+
+test('a pasted image attaches, and sending waits for uploads', async ({ page }) => {
+  const { app, state } = await setup(page);
+  let finish;
+  const done = new Promise(resolve => (finish = resolve));
+  await page.route('**/api/uploads/files?*', async r => {
+    await done;
+    return r.fulfill({ json: { path: '/uploads/u-image.png', kind: 'image' } });
+  });
+  await app.getByRole('button', { name: 'New chat' }).click();
+  const field = app.locator('textarea.native-input');
+  await field.evaluate(element => {
+    const data = new DataTransfer();
+    data.items.add(
+      new File([new Uint8Array([137, 80, 78, 71])], 'image.png', { type: 'image/png' })
+    );
+    element.dispatchEvent(
+      new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true })
+    );
+  });
+  await expect(app.locator('.chat-upload.uploading')).toHaveText('Uploading image.png…');
+  await field.fill('Which plant?');
+  await field.press('Enter');
+  await expect(app.locator('.chat-upload-error')).toHaveText('Wait for the upload to finish.');
+  expect(state.sent).toEqual([]);
+  await expect(field).toHaveValue('Which plant?');
+  finish();
+  await expect(app.locator('.chat-upload-name')).toHaveText('image.png');
+  await expect(app.locator('.chat-upload-error')).toBeHidden();
+  await field.press('Enter');
+  await expect.poll(() => state.sent.map(s => s.attachments)).toEqual([['/uploads/u-image.png']]);
+  // The new chat shows its file at once, then as the host saved it.
+  await expect(app.locator('.chat-message.user .chat-attachment')).toHaveText('image.png');
+  await expect(app.locator('.chat-title')).toHaveText('Which plant?');
 });
