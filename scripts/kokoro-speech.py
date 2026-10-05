@@ -52,6 +52,17 @@ def style(kokoro, request):
     return first * ratio + second * (1.0 - ratio)
 
 
+def louder(samples, gain):
+    """Kokoro speaks about 8 dB below normal spoken audio. Gain brings it up; above 0.9 a soft
+    limiter keeps the occasional peak from clipping."""
+    import numpy as np
+
+    boosted = samples * gain
+    over = np.abs(boosted) > 0.9
+    boosted[over] = np.sign(boosted[over]) * (0.9 + 0.1 * np.tanh((np.abs(boosted[over]) - 0.9) / 0.1))
+    return boosted
+
+
 async def generate(kokoro, request, write):
     """PCM v1: little-endian u32 byte count, mono 24kHz s16le, zero terminator."""
     import numpy as np
@@ -62,6 +73,7 @@ async def generate(kokoro, request, write):
     ):
         if rate != 24000:
             raise ValueError("Streaming requires 24 kHz audio")
+        samples = louder(np.asarray(samples, dtype=np.float32), request.get("gain", 1.0))
         pcm = (np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes()
         for offset in range(0, len(pcm), 16384):
             chunk = pcm[offset:offset + 16384]
@@ -186,6 +198,8 @@ def valid(request):
         and 0.5 <= request["speed"] <= 2.0
         and isinstance(request.get("blend_ratio"), (int, float))
         and 0.0 <= request["blend_ratio"] <= 1.0
+        and isinstance(request.get("gain"), (int, float))
+        and 0.5 <= request["gain"] <= 4.0
     )
 
 
@@ -252,6 +266,10 @@ def main():
         help="Weight of --voice: 1 is all first voice, 0 is all second voice",
     )
     parser.add_argument("--speed", type=float, default=1.0)
+    parser.add_argument(
+        "--gain", type=float, default=2.0,
+        help="Volume multiplier, 0.5–4; the default brings Kokoro to a normal speaking level",
+    )
     parser.add_argument("--language", default="en-us")
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--no-server", action="store_true",
@@ -262,6 +280,8 @@ def main():
         parser.error("speed must be 0.5–2.0 and threads must be 1–32")
     if not 0.0 <= args.blend_ratio <= 1.0:
         parser.error("blend ratio must be between 0 and 1")
+    if not 0.5 <= args.gain <= 4.0:
+        parser.error("gain must be between 0.5 and 4")
     if args.serve:
         serve(args)
         return
@@ -283,6 +303,7 @@ def main():
         "blend_ratio": args.blend_ratio,
         "speed": args.speed,
         "language": args.language,
+        "gain": args.gain,
     }
     sink = Sink(args, frames)
     if not args.no_server and through_worker(args, request, sink):

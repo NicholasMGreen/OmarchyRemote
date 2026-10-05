@@ -143,7 +143,9 @@ adapter; **Read** and Voice mode now use Kokoro. Remove just this override and
 restart to return to Piper; leave your dictation configuration unchanged.
 
 The adapter defaults to the American English `af_heart` voice at speed `1.0`.
-Use `--voice`, `--speed` (0.5–2.0), and `--language` to customize it. Voices must
+Use `--voice`, `--speed` (0.5–2.0), `--gain` (0.5–4), and `--language` to customize it. Kokoro speaks
+about 8 dB below normal spoken audio, so `--gain` defaults to 2, with a soft limiter that keeps
+the loudest peaks from clipping. Voices must
 match the chosen language; see the [Kokoro voice catalog](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md).
 `--model-dir` changes the model location and `--threads` controls CPU inference
 (four threads by default). Downloads happen only during setup; generation is

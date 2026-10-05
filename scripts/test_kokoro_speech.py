@@ -14,6 +14,30 @@ import wave
 WORKER_ENVIRONMENT = ["OMARCHY_KOKORO_SOCKET_DIR", "OMARCHY_KOKORO_WORKER_IDLE"]
 
 
+def adapter():
+    """The adapter script as a module, for its pure helpers."""
+    spec = importlib.util.spec_from_file_location(
+        "kokoro_speech", Path(__file__).with_name("kokoro-speech.py")
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@unittest.skipUnless(importlib.util.find_spec("numpy"), "numpy is not installed")
+class LoudnessTests(unittest.TestCase):
+    def test_gain_raises_speech_and_limits_peaks_without_clipping(self):
+        import numpy as np
+
+        louder = adapter().louder
+        quiet = np.array([0.0, 0.1, -0.2, 0.4], dtype=np.float32)
+        np.testing.assert_allclose(louder(quiet.copy(), 2.0), quiet * 2, rtol=1e-6)
+        loud = louder(np.array([0.6, -0.9, 1.0], dtype=np.float32), 2.0)
+        self.assertTrue(np.all(np.abs(loud) <= 1.0))
+        self.assertTrue(np.all(np.abs(loud) > 0.9))
+        self.assertEqual(list(np.sign(loud)), [1.0, -1.0, 1.0])
+
+
 @unittest.skipUnless(importlib.util.find_spec("kokoro_onnx"), "Kokoro is not installed")
 class KokoroSpeechTests(unittest.TestCase):
     @classmethod
