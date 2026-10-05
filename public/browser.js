@@ -609,6 +609,12 @@
       else this.showManager();
       return true;
     }
+    // Forward goes forward in the page's history.
+    navigateForward() {
+      if (this.optionsOpen || !this.pageOpen || this.forward.disabled) return false;
+      this.command('forward');
+      return true;
+    }
     showManager(focus = false) {
       this.restoreTarget = null;
       this.dismiss();

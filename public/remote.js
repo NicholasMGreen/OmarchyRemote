@@ -1371,6 +1371,7 @@
       this.syncPanels();
     }
     select(id) {
+      this.forwardPane = null;
       const changed = id !== this.selected;
       this.recentPanes = [
         ...new Set([id, this.selected, ...this.recentPanes].filter(Boolean)),
@@ -1408,7 +1409,16 @@
         return true;
       }
       if (this.detail.hidden) return false;
+      const left = this.selected;
       this.select(null);
+      this.forwardPane = left;
+      return true;
+    }
+    // Forward reopens the thread Back left, while it still exists.
+    navigateForward() {
+      const pane = this.forwardPane;
+      if (!this.detail.hidden || !this.snapshot?.panes.some(p => p.pane_id === pane)) return false;
+      this.select(pane);
       return true;
     }
     // A new tab in the pane's workspace starts in the pane's folder unless another is chosen.

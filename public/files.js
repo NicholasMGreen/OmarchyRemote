@@ -75,6 +75,8 @@
       this.pick = pick;
       this.pathKey = 'omarchy-' + windowKey + '-path';
       this.openTerminal = openTerminal;
+      // Places Back left, for Forward to return to.
+      this.forward = [];
       this.path = '';
       this.hidden = false;
       this.abort = new AbortController();
@@ -301,6 +303,7 @@
       this.text = null;
     }
     async browse(path, keepMode = false) {
+      if (!this.stepping) this.forward = [];
       if (!keepMode && !this.pick) {
         this.mode = 'browse';
         store('omarchy-files-mode', this.mode);
@@ -779,6 +782,7 @@
         this.body.append(node('p', 'remote-empty', 'Open a file or folder to add it here.'));
     }
     async preview(entry, line = 0) {
+      if (!this.stepping) this.forward = [];
       const seq = ++this.sequence;
       clearTimeout(this.debounce);
       this.clearPreview();
@@ -1025,11 +1029,33 @@
         this.selected.clear();
         this.drawChrome();
         this.drawList();
-      } else if (this.previewing) this.back();
-      else if (this.query) this.clearSearch();
-      else if (this.parent && this.path !== this.homePath) this.browse(this.parent);
-      else return false;
+      } else if (this.previewing) {
+        const entry = this.entryData;
+        this.step(() => this.back());
+        this.forward.push({ entry });
+      } else if (this.query) this.clearSearch();
+      else if (this.parent && this.path !== this.homePath) {
+        const path = this.path;
+        this.step(() => this.browse(this.parent));
+        this.forward.push({ path });
+      } else return false;
       return true;
+    }
+    /* Forward retraces Back: the folder it left or the file it closed. */
+    navigateForward() {
+      const next = this.forward.pop();
+      if (!next || this.dialog || this.selecting) return false;
+      this.step(() => (next.entry ? this.preview(next.entry) : this.browse(next.path)));
+      return true;
+    }
+    // Back and Forward keep the forward list; going anywhere new clears it, as a browser does.
+    step(go) {
+      this.stepping = true;
+      try {
+        go();
+      } finally {
+        this.stepping = false;
+      }
     }
     back() {
       if (this.editing && this.editor.value !== this.text) {

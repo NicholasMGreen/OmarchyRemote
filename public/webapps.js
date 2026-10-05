@@ -59,6 +59,7 @@
           this.preview.hidden = false;
         }
         if ('back' in v) this.canGoBack = !!v.back;
+        if ('forward' in v) this.canGoForward = !!v.forward;
         if (v.error) this.error(v.error);
         else if (v.loading === false && !this.failed) this.status.replaceChildren();
       };
@@ -84,6 +85,12 @@
     navigateBack() {
       if (!this.canGoBack || !this.ready) return false;
       this.command('back').catch(() => {});
+      return true;
+    }
+    // Forward goes forward in the web app's own page history.
+    navigateForward() {
+      if (!this.canGoForward || !this.ready) return false;
+      this.command('forward').catch(() => {});
       return true;
     }
     async command(action, extra = {}) {
