@@ -38,7 +38,18 @@ test('Files redesign supports search, editing, selections, ZIP and destination a
     await p.locator('.files-search-hit').click();
     await expect(p.locator('.files-code-row.highlighted')).toContainText('needle');
     await p.screenshot({ path: 'artifacts/files-handoff/after-preview.png' });
+    // The preview reads at the editor's size, and iOS may not enlarge it.
+    const font = selector =>
+      p.locator(selector).evaluate(e => {
+        const style = getComputedStyle(e);
+        return [style.fontSize, style.lineHeight, style.fontFamily];
+      });
+    const previewFont = await font('.files-text');
+    expect(
+      await p.locator('.files-text').evaluate(e => getComputedStyle(e).webkitTextSizeAdjust)
+    ).toBe('100%');
     await p.getByRole('button', { name: 'Edit file' }).click();
+    expect(await font('.files-editor')).toEqual(previewFont);
     await p.getByRole('textbox', { name: 'File contents' }).fill('const answer = 43;\n');
     const save = p.getByRole('button', { name: 'Save changes' });
     const box = await save.boundingBox();
