@@ -186,6 +186,8 @@
       this.dictation.cancelHolds?.forEach(cancel => cancel());
       ++this.epoch;
       this.enabled = keepMode;
+      // Whether Voice mode reads replies aloud; a quiet Voice mode only sends recordings.
+      if (!keepMode) this.readAloud = false;
       this.ready = false;
       this.autoRead = false;
       this.retryAt = 0;
@@ -219,12 +221,32 @@
         'data:audio/wav;base64,UklGRiYAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQIAAAAAAA==';
       this.player.play().catch(() => {});
     }
-    async toggle() {
+    async toggle(readAloud = true) {
       if (this.enabled || this.loading) return this.reset();
       this.reset();
+      this.readAloud = readAloud;
       this.autoRead = true;
-      this.unlock();
+      if (readAloud) this.unlock();
       await this.followThread();
+    }
+    // Holding the floating microphone switches reading replies aloud; it starts with the next reply.
+    async setReadAloud(on) {
+      if ((!this.enabled && !this.loading) || on === this.readAloud) return;
+      const epoch = this.epoch;
+      if (on) {
+        this.unlock();
+        try {
+          const provider = await (await this.request('/api/voice')).json();
+          if (!provider.available) throw Error(provider.message);
+        } catch (e) {
+          if (epoch === this.epoch) this.status(e.message);
+          return;
+        }
+        if (epoch !== this.epoch) return;
+      } else this.stopPlayback();
+      this.readAloud = on;
+      this.dictation.syncMicrophone();
+      this.status(on ? 'Replies read aloud' : 'Replies stay silent', false);
     }
     changeThread() {
       const keepMode = this.enabled || this.loading;
@@ -242,8 +264,10 @@
       this.dictation.syncMicrophone();
       this.status('Checking voice…', false);
       try {
-        const provider = await (await this.request('/api/voice')).json();
-        if (!provider.available) throw Error(provider.message);
+        if (this.readAloud) {
+          const provider = await (await this.request('/api/voice')).json();
+          if (!provider.available) throw Error(provider.message);
+        }
         const value = await this.latest(pane);
         if (epoch !== this.epoch || pane !== this.dictation.getTarget()) return;
         this.pane = pane;
@@ -256,10 +280,19 @@
         this.enabled = true;
         this.ready = true;
         this.dictation.syncMicrophone();
-        this.status('Voice on · recordings send automatically', false);
+        this.status(
+          this.readAloud
+            ? 'Voice on · recordings send automatically'
+            : 'Voice on · recordings send automatically · hold Talk to read replies aloud',
+          false
+        );
         this.poll();
       } catch (e) {
-        if (epoch === this.epoch) this.status(e.message);
+        if (epoch !== this.epoch) return;
+        // A tap on the microphone for a thread Voice cannot follow (a shell, say) is ordinary
+        // dictation into the draft; only asking for Voice reports why.
+        if (this.readAloud) this.status(e.message);
+        else this.reset();
       } finally {
         if (epoch === this.epoch) {
           this.loading = false;
@@ -280,7 +313,15 @@
           }
           // Keep fetching while audio plays, but never interrupt it with the next update.
           // The host retains this turn's prose so updates arriving during playback stay ordered.
-          if (this.autoRead && (!this.audioURL || this.player.paused) && !this.needsPlay) {
+          if (!this.readAloud) {
+            // Quiet: what arrives now counts as heard, so reading aloud starts with what follows.
+            for (const message of [
+              value.answer,
+              ...(value.updates || []),
+              ...(value.paragraphs || []),
+            ])
+              if (message?.id) this.seen.add(message.id);
+          } else if (this.autoRead && (!this.audioURL || this.player.paused) && !this.needsPlay) {
             const messages = value.paragraphs ? [...value.paragraphs] : [...(value.updates || [])];
             if (!value.paragraphs && !value.working && value.answer) messages.push(value.answer);
             const next = messages.find(message => message.id && !this.seen.has(message.id));
@@ -323,8 +364,14 @@
     recordingStarted() {
       this.stopPlayback();
       this.dictation.input.saveDraft();
-      return this.enabled && this.ready
-        ? { epoch: this.epoch, pane: this.pane, draft: this.dictation.input.draft }
+      // A tap starts recording while Voice is still getting ready; it sends if Voice comes up for
+      // the same thread before the transcript arrives.
+      return this.enabled || this.loading
+        ? {
+            epoch: this.epoch,
+            pane: this.dictation.getTarget(),
+            draft: this.dictation.input.draft,
+          }
         : null;
     }
     async transcribed(context, text, recordingGeneration) {
@@ -333,6 +380,8 @@
         !context ||
         context.epoch !== this.epoch ||
         !this.enabled ||
+        !this.ready ||
+        context.pane !== this.pane ||
         recordingGeneration !== this.dictation.generation
       )
         return;
@@ -537,7 +586,11 @@
       this.floatingIcon = node('span', 'herdr-voice-microphone-icon');
       this.floatingIcon.innerHTML = this.button.innerHTML;
       this.floatingCaption = node('span', 'herdr-voice-microphone-caption');
-      this.floatingButton.append(this.floatingIcon, this.floatingCaption);
+      // A speaker badge marks that replies are read aloud.
+      this.floatingSpeaker = node('span', 'herdr-voice-speaker');
+      this.floatingSpeaker.innerHTML =
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H2v6h4l5 4V5ZM15.5 8.5a5 5 0 0 1 0 7M19 5a10 10 0 0 1 0 14"/></svg>';
+      this.floatingButton.append(this.floatingIcon, this.floatingCaption, this.floatingSpeaker);
       this.floatingButton.hidden = true;
       this.cancelHolds = [];
       this.bindMicrophone(this.button);
@@ -585,13 +638,14 @@
         press = { x: e.clientX, y: e.clientY };
         const pane = this.getTarget();
         // Prime playback in the touch gesture; the hold callback runs later.
-        if (!this.voice.enabled && this.state === 'idle') this.voice.unlock();
+        if (this.state === 'idle' && (!this.voice.enabled || !this.voice.readAloud))
+          this.voice.unlock();
         control.setPointerCapture(e.pointerId);
         holdTimer = setTimeout(() => {
           const shouldToggle =
             press && control.isConnected && !document.hidden && pane === this.getTarget();
           cancelHold();
-          if (shouldToggle) this.toggleVoice();
+          if (shouldToggle) this.hold(control);
         }, 550);
       };
       control.onpointermove = e => {
@@ -611,24 +665,45 @@
           suppressClick = false;
           return;
         }
-        if (control === this.button && this.voice.enabled) this.toggleVoice();
-        else this.toggle();
+        if (control !== this.button) this.toggle();
+        else if (this.voice.enabled || this.voice.loading) this.toggleVoice();
+        else this.talk();
       };
       control.oncontextmenu = e => {
         e.preventDefault();
         e.stopPropagation();
         // Touch context menus must not toggle twice after a long press.
-        if (e.pointerType === 'mouse') this.toggleVoice();
+        if (e.pointerType === 'mouse') this.hold(control);
       };
       control.onkeydown = e => {
         if (e.key !== 'Enter' || !e.shiftKey) return;
         e.preventDefault();
         e.stopPropagation();
-        if (!e.repeat) this.toggleVoice();
+        if (!e.repeat) this.hold(control);
       };
     }
+    // Holding the bar microphone turns Voice mode on with replies read aloud (or off); holding the
+    // floating one switches reading aloud while Voice mode stays on.
+    hold(control) {
+      if (control === this.floatingButton && (this.voice.enabled || this.voice.loading))
+        this.voice.setReadAloud(!this.voice.readAloud);
+      else this.toggleVoice();
+    }
+    // A tap on the bar microphone records at once in a quiet Voice mode: the big button takes over,
+    // recordings send themselves, and replies are not read aloud.
+    talk() {
+      // A dictation started from the keyboard shortcut finishes as one.
+      if (this.state === 'recording') {
+        this.toggle();
+        return;
+      }
+      if (!['idle', 'error'].includes(this.state) || !this.getTarget()) return;
+      this.voice.toggle(false);
+      this.toggle();
+    }
     toggleVoice() {
-      if (this.voice.enabled) {
+      // While Voice is still starting, the bar microphone already means "turn Voice off".
+      if (this.voice.enabled || this.voice.loading) {
         this.cancel();
         this.voice.reset();
         return;
@@ -644,10 +719,11 @@
       this.syncMicrophone();
     }
     syncMicrophone() {
-      const enabled = !!this.voice?.enabled;
+      const enabled = !!this.voice?.enabled || !!this.voice?.loading;
+      const readAloud = enabled && !!this.voice.readAloud;
       const recording = this.state === 'recording';
       const busy = ['starting', 'transcribing'].includes(this.state);
-      this.button.innerHTML = enabled ? this.headphonesIcon : this.microphoneIcon;
+      this.button.innerHTML = readAloud ? this.headphonesIcon : this.microphoneIcon;
       this.button.dataset.mode = enabled ? 'voice' : 'dictation';
       this.button.dataset.state = enabled ? 'idle' : this.state;
       this.button.setAttribute(
@@ -658,18 +734,23 @@
         ? 'Voice mode on · tap to turn off'
         : recording
           ? 'Stop dictation'
-          : 'Dictate · hold for Voice mode · ⌘⌃X';
+          : 'Talk · hold to have replies read aloud · ⌘⌃X dictates';
       this.button.setAttribute(
         'aria-description',
         enabled
           ? 'Tap to turn off Voice mode and stop recording or playback.'
-          : 'Tap to record or finish. Hold for Voice mode, or press Shift+Enter.'
+          : 'Tap to talk: records now and sends when you finish. Hold for Voice mode with replies read aloud, or press Shift+Enter.'
       );
       this.button.setAttribute('aria-pressed', String(enabled || recording));
       this.button.disabled = busy && !enabled;
       this.button.setAttribute('aria-busy', String(busy && !enabled));
-      this.floatingButton.hidden = !enabled;
-      this.floatingButton.disabled = busy || !this.voice?.ready;
+      const loading = !!this.voice?.loading;
+      this.floatingButton.hidden = !enabled && !loading;
+      // While Voice starts, Talk still records (it sends once Voice is ready) and a hold still
+      // switches reading aloud; only a Voice that failed has nothing to offer.
+      this.floatingButton.disabled = busy || (!this.voice?.ready && !loading && !recording);
+      this.floatingButton.dataset.readAloud = String(readAloud);
+      this.floatingSpeaker.hidden = !readAloud;
       this.floatingButton.dataset.state = this.state;
       this.floatingButton.setAttribute(
         'aria-label',
@@ -679,7 +760,13 @@
       this.floatingButton.setAttribute('aria-busy', String(busy));
       this.floatingButton.title = recording
         ? 'Tap to finish recording and send'
-        : 'Tap to talk · hold to leave Voice mode';
+        : readAloud
+          ? 'Tap to talk · hold to stop reading replies aloud'
+          : 'Tap to talk · hold to read replies aloud';
+      this.floatingButton.setAttribute(
+        'aria-description',
+        readAloud ? 'Replies are read aloud.' : 'Replies are not read aloud.'
+      );
       this.floatingCaption.textContent = recording
         ? 'Send'
         : busy || this.voice?.loading
@@ -689,7 +776,7 @@
             : 'Talk';
     }
     async toggle() {
-      if (this.voice.enabled && !this.voice.ready) return;
+      if (this.voice.enabled && !this.voice.ready && this.state !== 'recording') return;
       if (this.state === 'recording') {
         this.stop();
         return;

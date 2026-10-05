@@ -974,6 +974,19 @@
 .herdr-voice-microphone:active:not(:disabled) {
   background: color-mix(in srgb, var(--theme-accent) 25%, var(--theme-surface-raised));
 }
+.herdr-voice-speaker {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2px solid var(--theme-surface-raised);
+  background: var(--theme-accent);
+  color: var(--theme-background);
+}
 .herdr-voice-microphone:focus-visible {
   outline: 3px solid var(--theme-foreground);
   outline-offset: 3px;

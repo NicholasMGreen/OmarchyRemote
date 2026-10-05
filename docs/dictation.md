@@ -1,7 +1,7 @@
 # Dictation
 
-In an open Herdr pane, tap the microphone or press **Command+Control+X** to record;
-press again to transcribe. Escape discards the recording. The transcript appends
+In an open Herdr pane, press **Command+Control+X** to record; press again to transcribe
+(tapping the microphone starts a quiet Voice mode instead; see below). Escape discards the recording. The transcript appends
 to that pane's saved draft, preserving edits made while waiting. It never sends
 terminal input automatically. Settings shows the connected host's provider status.
 
@@ -62,7 +62,7 @@ to the host and does not replace Apple's keyboard microphone globally.
 
 ## Voice conversations
 
-Hold the microphone for 550 ms to enable **Voice mode** while still pressing (release does not trigger another action), then tap the headphones button in the bottom bar to turn it off and stop recording or playback. Keyboard users can focus the microphone and press **Shift+Enter**. Voice mode enables a conversation loop using the same microphone:
+Tap the microphone to talk: it records immediately in a quiet **Voice mode**, where a large floating **Talk** button finishes this recording and starts the next, recordings send automatically, and replies are not read aloud. Hold **Talk** for 550 ms to switch reading replies aloud on or off; reading starts with the next reply. Hold the bottom-bar microphone for 550 ms (release does not trigger another action) to start Voice mode with reading aloud on. While Voice mode is on, tap the bottom-bar microphone (headphones while reading aloud) to turn it off and stop recording or playback. Keyboard users can focus either microphone and press **Shift+Enter** for the hold. In a thread Voice cannot follow, a tap is ordinary dictation into the draft. Voice mode enables a conversation loop using the same microphone:
 record, press again to transcribe, send, and listen to the assistant’s initial reply, progress updates, and completed answer.
 The host generates speech for available completed paragraphs; playback stays in order and never interrupts the previous message. Kokoro can stream audio as it is generated; other adapters return complete WAV files. **Read** works without
 Voice mode; **Stop** stops playback or suppresses an in-flight generation. Starting
