@@ -299,6 +299,10 @@ struct Transcript {
     candidate_id: String,
     paragraphs: Paragraphs,
     line: usize,
+    /// Background commands and agents not yet finished, as `{id, description, started}`.
+    background: Vec<Value>,
+    /// What each background tool call is for, until its result names the task.
+    launches: HashMap<String, String>,
 }
 impl Transcript {
     fn feed(&mut self, agent: &str, line: &str) {
@@ -370,6 +374,7 @@ impl Transcript {
                 _ => {}
             }
         } else if v["isSidechain"] != true {
+            self.track_background(&v);
             let m = &v["message"];
             let local = m["content"].as_str().is_some_and(|s| {
                 [
@@ -448,7 +453,75 @@ impl Transcript {
         }
     }
     fn value(&self) -> Value {
-        json!({"answer":self.answer,"updates":self.updates,"paragraphs":self.paragraphs.values(),"working":self.active})
+        json!({"answer":self.answer,"updates":self.updates,"paragraphs":self.paragraphs.values(),"working":self.active,"background":self.background})
+    }
+    /// A background task starts when a tool result carries a `backgroundTaskId` and ends with the
+    /// `<task-notification>` Claude Code queues for the session (or a kill). Only those records
+    /// count, never text that quotes a notification.
+    fn track_background(&mut self, v: &Value) {
+        let m = &v["message"];
+        let remove = |background: &mut Vec<Value>, id: &str| background.retain(|t| t["id"] != id);
+        if v["type"] == "assistant" {
+            for block in m["content"].as_array().into_iter().flatten() {
+                if block["type"] != "tool_use" {
+                    continue;
+                }
+                let input = &block["input"];
+                if input["run_in_background"] == true {
+                    let what = ["description", "command", "prompt"]
+                        .iter()
+                        .find_map(|key| input[*key].as_str())
+                        .unwrap_or("background task");
+                    if self.launches.len() >= 256 {
+                        self.launches.clear();
+                    }
+                    let what = what.lines().next().unwrap_or_default();
+                    self.launches.insert(
+                        block["id"].as_str().unwrap_or_default().to_owned(),
+                        what.chars().take(120).collect(),
+                    );
+                }
+                if ["KillShell", "KillBash", "TaskStop"]
+                    .contains(&block["name"].as_str().unwrap_or_default())
+                    && let Some(id) = ["shell_id", "task_id", "bash_id"]
+                        .iter()
+                        .find_map(|key| input[*key].as_str())
+                {
+                    remove(&mut self.background, id);
+                }
+            }
+        }
+        if v["type"] == "user"
+            && let Some(id) = v["toolUseResult"]["backgroundTaskId"].as_str()
+        {
+            let tool = m["content"]
+                .as_array()
+                .and_then(|blocks| blocks.iter().find_map(|b| b["tool_use_id"].as_str()))
+                .unwrap_or_default();
+            let description = self
+                .launches
+                .remove(tool)
+                .unwrap_or_else(|| "background task".into());
+            remove(&mut self.background, id);
+            self.background
+                .push(json!({"id":id,"description":description,"started":v["timestamp"]}));
+        }
+        let notice = match v["type"].as_str() {
+            Some("queue-operation") => v["content"].as_str(),
+            Some("attachment") => v["attachment"]["prompt"].as_str(),
+            Some("user") => m["content"]
+                .as_str()
+                .or_else(|| m["content"][0]["text"].as_str()),
+            _ => None,
+        };
+        if let Some(text) = notice.filter(|t| t.trim_start().starts_with("<task-notification>"))
+            && let Some(id) = text
+                .split("<task-id>")
+                .nth(1)
+                .and_then(|rest| rest.split("</task-id>").next())
+        {
+            remove(&mut self.background, id.trim());
+        }
     }
 }
 #[cfg(test)]
@@ -593,6 +666,129 @@ async fn latest(app: &App, pane: &str) -> anyhow::Result<Value> {
             value["working"] = json!(true);
         }
         Ok(value)
+    })
+    .await?
+}
+/// Seconds since 1970 for an RFC 3339 UTC timestamp such as `2026-09-15T13:10:22.935Z`.
+fn epoch(time: &str) -> Option<f64> {
+    let (date, clock) = time.strip_suffix('Z')?.split_once('T')?;
+    let mut date = date.split('-').map(|n| n.parse::<i64>());
+    let (year, month, day) = (date.next()?.ok()?, date.next()?.ok()?, date.next()?.ok()?);
+    let mut clock = clock.split(':');
+    let (hour, minute) = (
+        clock.next()?.parse::<i64>().ok()?,
+        clock.next()?.parse::<i64>().ok()?,
+    );
+    let second: f64 = clock.next()?.parse().ok()?;
+    // Days from the civil date (Howard Hinnant's days_from_civil).
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let yoe = year - era * 400;
+    let doy = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+    Some((days * 86_400 + hour * 3600 + minute * 60) as f64 + second)
+}
+/// When a process started, in seconds since 1970.
+fn process_started(pid: u64) -> Option<f64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let ticks: f64 = stat
+        .rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()?;
+    let boot: f64 = fs::read_to_string("/proc/stat")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("btime "))?
+        .trim()
+        .parse()
+        .ok()?;
+    let hertz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
+    Some(boot + ticks / hertz)
+}
+/// Tasks the running agent still owns: ones begun before it started belonged to an earlier
+/// process, whose background work ended with it.
+fn current_tasks(tasks: &Value, started: Option<f64>) -> Vec<Value> {
+    tasks
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(
+            |task| match (started, task["started"].as_str().and_then(epoch)) {
+                (Some(process), Some(task)) => task + 2.0 >= process,
+                _ => true,
+            },
+        )
+        .map(|task| json!({"description":task["description"],"started":task["started"]}))
+        .collect()
+}
+type BackgroundCache = HashMap<String, (std::time::Instant, Vec<Value>)>;
+static BACKGROUND: LazyLock<Mutex<BackgroundCache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Adds `background` to each Claude pane in a Herdr snapshot: the background commands and agents
+/// it waits on, so an idle agent that is still waiting is not mistaken for a finished one. Kept
+/// for a few seconds, as every client asks for snapshots.
+pub async fn annotate(herdr: &crate::herdr::Herdr, snapshot: &mut Value) {
+    let agents: Vec<Value> = snapshot["agents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|agent| agent["agent"] == "claude")
+        .cloned()
+        .collect();
+    for agent in agents {
+        let Some(pane) = agent["pane_id"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        let key = format!("{pane}:{}", agent["terminal_id"]);
+        let cached = BACKGROUND
+            .lock()
+            .unwrap()
+            .get(&key)
+            .filter(|(at, _)| at.elapsed() < std::time::Duration::from_secs(4))
+            .map(|(_, tasks)| tasks.clone());
+        let tasks = match cached {
+            Some(tasks) => tasks,
+            None => {
+                let tasks = background_of(herdr, &pane, agent).await.unwrap_or_default();
+                let mut cache = BACKGROUND.lock().unwrap();
+                if cache.len() >= 256 {
+                    cache.clear();
+                }
+                cache.insert(key, (std::time::Instant::now(), tasks.clone()));
+                tasks
+            }
+        };
+        if tasks.is_empty() {
+            continue;
+        }
+        for entry in snapshot["panes"].as_array_mut().into_iter().flatten() {
+            if entry["pane_id"] == pane.as_str() {
+                entry["background"] = json!(tasks);
+            }
+        }
+    }
+}
+async fn background_of(
+    herdr: &crate::herdr::Herdr,
+    pane: &str,
+    agent: Value,
+) -> anyhow::Result<Vec<Value>> {
+    let info = herdr
+        .call("pane.process_info", json!({"pane_id":pane}))
+        .await?;
+    tokio::task::spawn_blocking(move || {
+        let path = resolve("claude", &info["process_info"], &agent)?;
+        let value = read_answer("claude", &path)?;
+        let started = info["process_info"]["foreground_processes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|p| p["name"].as_str().unwrap_or_default().contains("claude"))
+            .and_then(|p| p["pid"].as_u64())
+            .and_then(process_started);
+        Ok(current_tasks(&value["background"], started))
     })
     .await?
 }
@@ -1174,6 +1370,58 @@ mod tests {
         assert_eq!(read_answer("claude", &path).unwrap(), full(&rewritten));
         READS.lock().unwrap().remove(&path);
     }
+    #[test]
+    fn background_tasks_run_until_their_notification_and_quotes_do_not_count() {
+        let start = |tool: &str, id: &str, at: &str| {
+            [
+                json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":tool,"name":"Bash","input":{"command":"npm test","description":"Run the tests\nsecond line","run_in_background":true}}]}}),
+                json!({"type":"user","timestamp":at,"toolUseResult":{"backgroundTaskId":id},"message":{"content":[{"type":"tool_result","tool_use_id":tool,"content":"Command running in background with ID: x"}]}}),
+            ]
+        };
+        let notify = |id: &str| {
+            format!("<task-notification> <task-id>{id}</task-id> <status>completed</status>")
+        };
+        let mut rows: Vec<Value> = start("t1", "aaa", "2026-10-05T10:00:00Z").into();
+        rows.extend(start("t2", "bbb", "2026-10-05T10:01:00Z"));
+        let result = parse("claude", &log(&rows));
+        assert_eq!(result["background"].as_array().unwrap().len(), 2);
+        assert_eq!(result["background"][0]["description"], "Run the tests");
+        // Output that merely quotes a notification is not one.
+        rows.push(json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t9","content":notify("aaa")}]}}));
+        rows.push(json!({"type":"assistant","message":{"content":[{"type":"text","text":notify("aaa")}]}}));
+        assert_eq!(
+            parse("claude", &log(&rows))["background"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        // Claude Code's queued notification ends the task, as does a kill.
+        rows.push(json!({"type":"queue-operation","operation":"enqueue","content":notify("aaa")}));
+        let left = parse("claude", &log(&rows))["background"].clone();
+        assert_eq!(left.as_array().unwrap().len(), 1);
+        assert_eq!(left[0]["id"], "bbb");
+        rows.push(json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"k","name":"KillShell","input":{"shell_id":"bbb"}}]}}));
+        assert_eq!(parse("claude", &log(&rows))["background"], json!([]));
+    }
+
+    #[test]
+    fn tasks_from_an_earlier_process_are_dropped() {
+        assert_eq!(epoch("1970-01-01T00:00:00Z"), Some(0.0));
+        assert_eq!(epoch("2023-10-03T12:00:00Z"), Some(1_696_334_400.0));
+        assert_eq!(epoch("2000-02-29T00:00:01.5Z"), Some(951_782_401.5));
+        assert_eq!(epoch("not a time"), None);
+        let tasks = json!([
+            {"id":"old","description":"Before a restart","started":"2026-10-05T09:00:00Z"},
+            {"id":"new","description":"Still running","started":"2026-10-05T10:00:00Z"},
+        ]);
+        let restarted = epoch("2026-10-05T09:30:00Z");
+        let current = current_tasks(&tasks, restarted);
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0]["description"], "Still running");
+        assert_eq!(current_tasks(&tasks, None).len(), 2);
+    }
+
     #[test]
     fn speech_ids_accept_only_current_progress_or_completed_answer() {
         let mut value = json!({"answer":{"key":"final","text":"Done"},"updates":[{"key":"update:one","text":"Checking"}]});

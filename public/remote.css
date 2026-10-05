@@ -572,6 +572,16 @@
 .herdr-state[data-state='working'] {
   color: var(--theme-accent);
 }
+.herdr-state[data-state='waiting'] {
+  color: var(--theme-cyan);
+}
+.herdr-background {
+  font-size: 10px;
+  color: var(--theme-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .herdr-state[data-state='blocked'] {
   color: var(--theme-yellow);
 }

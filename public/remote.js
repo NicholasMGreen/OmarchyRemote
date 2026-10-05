@@ -201,13 +201,21 @@
     const text = shift ? symbols[key] || key.toUpperCase() : key;
     return { data: text, text, keys: [] };
   }
+  // An idle or finished agent that still has background commands or agents running is waiting,
+  // not done; the host lists them in `background`.
+  function paneState(p) {
+    const s = String(p.agent_status || '');
+    return p.background?.length && !/working|running|progress|busy|blocked/i.test(s)
+      ? 'waiting'
+      : s;
+  }
   // Match Herdr Mobile's attention/working/done/ready groups. Activity sequences
   // come from agent.list; per-pane revision numbers must never rank different panes.
   function orderHerdr(snapshot) {
     const rank = p => {
-      const s = String(p.agent_status || '').toLowerCase();
+      const s = paneState(p).toLowerCase();
       if (s.includes('blocked')) return p.attention_kind === 'chat' ? 3 : 0;
-      if (/working|running|progress|busy/.test(s)) return 1;
+      if (/working|running|progress|busy|waiting/.test(s)) return 1;
       if (/done|complete|finish|success|unread/.test(s)) return 2;
       if (s === 'idle' || s === 'ready') return 3;
       return 4;
@@ -794,11 +802,23 @@
   const paneGroup = p =>
     /blocked/.test(p.agent_status) && p.attention_kind !== 'chat'
       ? 'attention'
-      : /working|running|progress|busy/.test(p.agent_status)
+      : /working|running|progress|busy|waiting/.test(paneState(p))
         ? 'running'
         : /idle|ready|blocked/.test(p.agent_status)
           ? 'idle'
           : 'done';
+  // "⏳ Run the tests +1" for the background work a pane waits on.
+  function backgroundLine(p) {
+    const tasks = p.background || [];
+    if (!tasks.length) return null;
+    const line = node(
+      'span',
+      'herdr-background',
+      '⏳ ' + tasks[0].description + (tasks.length > 1 ? ` +${tasks.length - 1}` : '')
+    );
+    line.title = tasks.map(task => task.description).join('\n');
+    return line;
+  }
   class HerdrApp {
     constructor(root, bridge) {
       this.root = root;
@@ -1195,6 +1215,7 @@
           p.tab_id,
           p.agent,
           p.agent_status,
+          p.background?.map(task => task.description),
           p.state_change_seq,
           p.attention_kind,
           p.terminal_title_stripped,
@@ -1259,8 +1280,11 @@
             label,
             node('span', 'remote-status', HyprlandApps.tilde(pane.foreground_cwd || pane.cwd))
           );
-          const status = node('span', 'herdr-state', pane.agent_status || 'unknown');
-          status.dataset.state = pane.agent_status || 'unknown';
+          const waiting = backgroundLine(pane);
+          if (waiting) info.append(waiting);
+          const state = paneState(pane) || 'unknown';
+          const status = node('span', 'herdr-state', state);
+          status.dataset.state = state;
           row.append(icon, info, status);
           group.append(row);
         }
@@ -1290,6 +1314,7 @@
       const signature = JSON.stringify([
         pane.pane_id,
         pane.agent_status,
+        pane.background?.length,
         pane.cwd,
         this.recentPanes,
         this.snapshot?.workspaces,
@@ -1304,7 +1329,12 @@
       ]);
       if (signature !== this.detailSignature) {
         this.detailSignature = signature;
-        this.metadata.textContent = `${pane.agent || 'shell'} · ${pane.agent_status || 'unknown'} · ${HyprlandApps.tilde(pane.foreground_cwd || pane.cwd)}`;
+        const count = pane.background?.length || 0;
+        const state =
+          paneState(pane) === 'waiting'
+            ? `waiting on ${count} background ${count === 1 ? 'task' : 'tasks'}`
+            : pane.agent_status || 'unknown';
+        this.metadata.textContent = `${pane.agent || 'shell'} · ${state} · ${HyprlandApps.tilde(pane.foreground_cwd || pane.cwd)}`;
         this.paneTabs.replaceChildren();
         const projectLabel = node(
           'span',
@@ -2080,5 +2110,6 @@
     keyInput,
     orderHerdr,
     paneGroup,
+    paneState,
   };
 })();

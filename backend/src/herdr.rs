@@ -60,6 +60,7 @@ impl Herdr {
                 }
             }
         }
+        crate::voice::annotate(self, &mut snapshot).await;
         Ok(snapshot)
     }
     /// The last `lines` lines of a pane; Herdr returns at most 1000 whatever is asked.
