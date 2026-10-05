@@ -330,6 +330,41 @@ test('a full-screen program is reported so the phone keeps its layout', async ()
   }
 });
 
+test('a message naming an image presses Return after the paste, not with it', async () => {
+  const created = await herdr('workspace.create', {
+    label: 'Omarchy automated test',
+    cwd: '/tmp',
+    focus: false,
+  });
+  const pane = created.root_pane.pane_id;
+  const input = body => api(`herdr/panes/${encodeURIComponent(pane)}/input`, body);
+  const screen = async () => (await api(`herdr/panes/${encodeURIComponent(pane)}`)).text;
+  try {
+    await new Promise(r => setTimeout(r, 1200));
+    await input({ text: 'cat', keys: ['Enter'], typed: true });
+    await new Promise(r => setTimeout(r, 600));
+    // A shell shows no attachments, so Return follows once the screen settles.
+    const started = Date.now();
+    await input({ text: 'see Image: /tmp/omarchy-test-picture.png', keys: ['Enter'] });
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed >= 500 && elapsed < 4500, String(elapsed));
+    let lines = [];
+    for (let i = 0; i < 20; i++) {
+      lines = (await screen()).split('\n').map(l => l.replace(/\x1b\[[0-9;]*m/g, '').trim());
+      if (lines.filter(l => l === 'see Image: /tmp/omarchy-test-picture.png').length >= 2) break;
+      await new Promise(r => setTimeout(r, 150));
+    }
+    // cat echoes the line back only after Return arrives.
+    assert.equal(
+      lines.filter(l => l === 'see Image: /tmp/omarchy-test-picture.png').length,
+      2,
+      lines.join('\n')
+    );
+  } finally {
+    await herdr('workspace.close', { workspace_id: created.workspace.workspace_id });
+  }
+});
+
 test('Keys-mode input is typed while messages are pasted', async () => {
   const created = await herdr('workspace.create', {
     label: 'Omarchy automated test',

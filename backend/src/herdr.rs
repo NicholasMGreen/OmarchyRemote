@@ -69,6 +69,20 @@ impl Herdr {
     pub async fn read(&self, pane: &str) -> Result<Value> {
         self.read_lines(pane, PANE_LINES).await
     }
+    /// The pane's visible screen as plain text. The ANSI read stays fast for full-screen panes,
+    /// where Herdr's plain-text read can take seconds.
+    async fn screen(&self, pane: &str) -> String {
+        let read = self
+            .call(
+                "pane.read",
+                json!({"pane_id":pane,"source":"visible","format":"ansi","strip_ansi":false}),
+            )
+            .await
+            .unwrap_or_default();
+        let ansi = regex::Regex::new(r"\x1b\[[0-?]*[ -/]*[@-~]").unwrap();
+        ansi.replace_all(read["read"]["text"].as_str().unwrap_or_default(), "")
+            .into_owned()
+    }
     /// Whether a full-screen program such as Vim or less owns the pane. Herdr does not report the
     /// alternate screen, but it hides the scrollback and a read is then exactly the screen.
     pub async fn fullscreen(&self, pane: &str, text: &str) -> Result<bool> {
@@ -114,12 +128,44 @@ impl Herdr {
         typed: bool,
     ) -> Result<Value> {
         if !typed {
-            return self
+            let images = image_paths(text);
+            if images == 0 || keys.is_empty() {
+                return self
+                    .call(
+                        "pane.send_input",
+                        json!({"pane_id":pane,"text":text,"keys":keys}),
+                    )
+                    .await;
+            }
+            // Claude Code turns a pasted image path into an attachment after the paste arrives,
+            // and a Return sent with the paste lands while it is busy and is lost. Paste first,
+            // then press the keys once the attachments show, or the screen settles for agents
+            // that show none.
+            let before = attachments(&self.screen(pane).await);
+            let result = self
                 .call(
                     "pane.send_input",
-                    json!({"pane_id":pane,"text":text,"keys":keys}),
+                    json!({"pane_id":pane,"text":text,"keys":[]}),
                 )
-                .await;
+                .await?;
+            let start = std::time::Instant::now();
+            let (mut last, mut settled) = (String::new(), std::time::Instant::now());
+            while start.elapsed() < std::time::Duration::from_secs(4) {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let screen = self.screen(pane).await;
+                if attachments(&screen) >= before + images {
+                    break;
+                }
+                if screen != last {
+                    last = screen;
+                    settled = std::time::Instant::now();
+                } else if settled.elapsed() >= std::time::Duration::from_millis(600) {
+                    break;
+                }
+            }
+            self.call("pane.send_keys", json!({"pane_id":pane,"keys":keys}))
+                .await?;
+            return Ok(result);
         }
         let mut result = json!({"type":"ok"});
         if !text.is_empty() {
@@ -133,5 +179,39 @@ impl Herdr {
                 .await?;
         }
         Ok(result)
+    }
+}
+
+/// How many image files a message names by absolute path, as Herdr's attach button writes them.
+fn image_paths(text: &str) -> usize {
+    text.split_whitespace()
+        .map(|word| {
+            word.trim_matches(|c| c == '\'' || c == '"')
+                .to_ascii_lowercase()
+        })
+        .filter(|word| {
+            word.starts_with('/')
+                && [".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".heif"]
+                    .iter()
+                    .any(|extension| word.ends_with(extension))
+        })
+        .count()
+}
+/// Claude Code's attachments on screen, such as `[Image #10]`.
+fn attachments(screen: &str) -> usize {
+    screen.matches("[Image #").count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn messages_with_image_paths_wait_for_their_attachments() {
+        let message = "Change these cards\nImage: /home/qa/.local/share/omarchy-remote/uploads/a-IMG_0031.JPEG\nFile: /tmp/notes.txt\nImage: '/tmp/b.png'";
+        assert_eq!(image_paths(message), 2);
+        assert_eq!(image_paths("look at image.png and /tmp/notes.txt"), 0);
+        assert_eq!(attachments("❯ [Image #10]lets change\n  ⎿ [Image #9]"), 2);
+        assert_eq!(attachments("no images"), 0);
     }
 }
