@@ -57,10 +57,11 @@ class KokoroSpeechTests(unittest.TestCase):
                 os.environ[key] = value
         cls.sockets.cleanup()
 
-    def worker_sockets(self):
-        return list((Path(self.sockets.name) / "omarchy-remote").glob("kokoro-*.sock"))
+    def worker_sockets(self, sockets=None):
+        base = Path(sockets or self.sockets.name)
+        return list((base / "omarchy-remote").glob("kokoro-*.sock"))
 
-    def speak(self, folder, *options):
+    def speak(self, folder, *options, sockets=None):
         source = Path(folder) / "input.txt"
         output = Path(folder) / "output.wav"
         source.write_text("A short sentence to speak.", encoding="utf-8")
@@ -68,20 +69,25 @@ class KokoroSpeechTests(unittest.TestCase):
             sys.executable, str(Path(__file__).with_name("kokoro-speech.py")),
             "--text-file", str(source), "--wav-file", str(output), *options,
         ]
-        return subprocess.run(command, capture_output=True, timeout=180), output
+        environment = {**os.environ, "OMARCHY_KOKORO_SOCKET_DIR": sockets} if sockets else None
+        return (
+            subprocess.run(command, capture_output=True, timeout=180, env=environment),
+            output,
+        )
 
     def test_worker_keeps_the_model_loaded_between_requests(self):
-        with tempfile.TemporaryDirectory() as folder:
+        # Its own socket folder, so a worker left by another test cannot make the first request warm.
+        with tempfile.TemporaryDirectory() as folder, tempfile.TemporaryDirectory() as sockets:
             started = time.monotonic()
-            result, output = self.speak(folder)
+            result, output = self.speak(folder, sockets=sockets)
             cold = time.monotonic() - started
             self.assertEqual(result.returncode, 0, result.stderr.decode())
             self.assertTrue(output.exists())
-            [worker] = self.worker_sockets()
+            [worker] = self.worker_sockets(sockets)
             identity = worker.stat().st_ino
             output.unlink()
             started = time.monotonic()
-            result, output = self.speak(folder)
+            result, output = self.speak(folder, sockets=sockets)
             warm = time.monotonic() - started
             self.assertEqual(result.returncode, 0, result.stderr.decode())
             with wave.open(str(output)) as wav:
