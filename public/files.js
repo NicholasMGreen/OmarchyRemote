@@ -202,6 +202,19 @@
       root.addEventListener('touchcancel', () => {
         controlTouch = null;
       });
+      // Presses stay inside Files, except a swipe from the screen's side edges, which belongs to the
+      // shell (workspaces, or Back and Forward), using the shell's edge band. Such a swipe often
+      // starts just outside Files, so where each press began is noted for the whole document.
+      const edge = e => {
+        const band = Math.max(24, innerWidth * 0.08);
+        return e.clientX < band || e.clientX > innerWidth - band;
+      };
+      const edgePresses = new Set();
+      document.addEventListener(
+        'pointerdown',
+        e => (edge(e) ? edgePresses.add(e.pointerId) : edgePresses.delete(e.pointerId)),
+        { capture: true, signal: this.abort.signal }
+      );
       for (const type of [
         'pointerdown',
         'pointerup',
@@ -210,7 +223,13 @@
         'touchend',
         'click',
       ])
-        root.addEventListener(type, e => e.stopPropagation());
+        root.addEventListener(type, e => {
+          if (type.startsWith('pointer') && edgePresses.has(e.pointerId)) {
+            if (type === 'pointerup') edgePresses.delete(e.pointerId);
+            return;
+          }
+          e.stopPropagation();
+        });
       this.browse(this.path, true);
     }
     button(label, fn, aria, cls = 'remote-button') {

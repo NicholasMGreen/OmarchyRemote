@@ -117,3 +117,35 @@ for (const platform of ['android', 'ios']) {
     await expect.poll(current).toBe('settings');
   });
 }
+
+test('an edge swipe inside Files reaches the shell, while other presses stay in Files', async ({
+  page: p,
+}) => {
+  await p.setViewportSize({ width: 402, height: 874 });
+  await p.route('**/api/**', r => r.abort());
+  await p.route(
+    url => url.pathname === '/api/files',
+    r => r.fulfill({ json: listing(new URL(r.request().url()).searchParams.get('path') || home) })
+  );
+  await p.goto('/native/');
+  const current = () =>
+    p.evaluate(
+      () => document.querySelector('[data-workspace][data-active="true"]')?.dataset.workspace
+    );
+  await p.getByText('files', { exact: true }).first().click();
+  await expect.poll(current).toBe('files');
+  await p.waitForTimeout(600);
+  const swipe = async (fromX, toX) => {
+    await p.mouse.move(fromX, 400);
+    await p.mouse.down();
+    await p.mouse.move(toX, 400, { steps: 8 });
+    await p.mouse.up();
+    await p.waitForTimeout(600);
+  };
+  // A swipe that starts inside the list is the list's own.
+  await swipe(60, 330);
+  await expect.poll(current).toBe('files');
+  // From the left edge it is the shell's: the previous workspace.
+  await swipe(3, 250);
+  await expect.poll(current).toBe('home');
+});
