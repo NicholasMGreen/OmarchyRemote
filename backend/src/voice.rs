@@ -455,9 +455,11 @@ impl Transcript {
     fn value(&self) -> Value {
         json!({"answer":self.answer,"updates":self.updates,"paragraphs":self.paragraphs.values(),"working":self.active,"background":self.background})
     }
-    /// A background task starts when a tool result carries a `backgroundTaskId` and ends with the
-    /// `<task-notification>` Claude Code queues for the session (or a kill). Only those records
-    /// count, never text that quotes a notification.
+    /// A background task starts when a tool result names it: a background command's
+    /// `backgroundTaskId`, a Monitor's `taskId`, or a background agent's `agentId`. It ends with
+    /// a `<task-notification>` Claude Code queues for the session that carries a `<status>` (a
+    /// Monitor's other notifications are events while it keeps running) or reports the Monitor
+    /// expired, or with a kill. Only those records count, never text that quotes a notification.
     fn track_background(&mut self, v: &Value) {
         let m = &v["message"];
         let remove = |background: &mut Vec<Value>, id: &str| background.retain(|t| t["id"] != id);
@@ -467,7 +469,7 @@ impl Transcript {
                     continue;
                 }
                 let input = &block["input"];
-                if input["run_in_background"] == true {
+                if input["run_in_background"] == true || block["name"] == "Monitor" {
                     let what = ["description", "command", "prompt"]
                         .iter()
                         .find_map(|key| input[*key].as_str())
@@ -491,13 +493,26 @@ impl Transcript {
                 }
             }
         }
+        let result = &v["toolUseResult"];
+        let tool = m["content"]
+            .as_array()
+            .and_then(|blocks| blocks.iter().find_map(|b| b["tool_use_id"].as_str()))
+            .unwrap_or_default();
+        let started = result["backgroundTaskId"]
+            .as_str()
+            .or_else(|| {
+                result["agentId"]
+                    .as_str()
+                    .filter(|_| result["isAsync"] == true)
+            })
+            .or_else(|| {
+                result["taskId"]
+                    .as_str()
+                    .filter(|_| self.launches.contains_key(tool))
+            });
         if v["type"] == "user"
-            && let Some(id) = v["toolUseResult"]["backgroundTaskId"].as_str()
+            && let Some(id) = started
         {
-            let tool = m["content"]
-                .as_array()
-                .and_then(|blocks| blocks.iter().find_map(|b| b["tool_use_id"].as_str()))
-                .unwrap_or_default();
             let description = self
                 .launches
                 .remove(tool)
@@ -515,12 +530,16 @@ impl Transcript {
             _ => None,
         };
         if let Some(text) = notice.filter(|t| t.trim_start().starts_with("<task-notification>"))
-            && let Some(id) = text
-                .split("<task-id>")
-                .nth(1)
-                .and_then(|rest| rest.split("</task-id>").next())
+            && (text.contains("<status>") || text.contains("[Monitor expired"))
         {
-            remove(&mut self.background, id.trim());
+            // One notification can end several tasks.
+            for id in text
+                .split("<task-id>")
+                .skip(1)
+                .filter_map(|rest| rest.split("</task-id>").next())
+            {
+                remove(&mut self.background, id.trim());
+            }
         }
     }
 }
@@ -1403,6 +1422,41 @@ mod tests {
         assert_eq!(left[0]["id"], "bbb");
         rows.push(json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"k","name":"KillShell","input":{"shell_id":"bbb"}}]}}));
         assert_eq!(parse("claude", &log(&rows))["background"], json!([]));
+    }
+
+    #[test]
+    fn monitors_run_through_their_events_and_background_agents_count() {
+        let rows = vec![
+            json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"m","name":"Monitor","input":{"command":"watch.sh","description":"Watch the render jobs"}}]}}),
+            json!({"type":"user","timestamp":"2026-10-05T10:00:00Z","toolUseResult":{"taskId":"mon","timeoutMs":1800000},"message":{"content":[{"type":"tool_result","tool_use_id":"m","content":"Monitor started"}]}}),
+            json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"g","name":"Agent","input":{"description":"Render the excerpt","prompt":"...","run_in_background":true}}]}}),
+            json!({"type":"user","timestamp":"2026-10-05T10:01:00Z","toolUseResult":{"isAsync":true,"status":"async_launched","agentId":"agent1"},"message":{"content":[{"type":"tool_result","tool_use_id":"g","content":"launched"}]}}),
+            // A tool result that merely has a taskId, from no Monitor, is not a background task.
+            json!({"type":"user","toolUseResult":{"taskId":"todo"},"message":{"content":[{"type":"tool_result","tool_use_id":"other","content":"ok"}]}}),
+        ];
+        let names = |rows: &[Value]| -> Vec<String> {
+            parse("claude", &log(rows))["background"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["description"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(
+            names(&rows),
+            ["Watch the render jobs", "Render the excerpt"]
+        );
+        let queued =
+            |text: &str| json!({"type":"queue-operation","operation":"enqueue","content":text});
+        let mut rows = rows;
+        // A Monitor event keeps it running; expiry ends it.
+        rows.push(queued("<task-notification> <task-id>mon</task-id> <summary>Monitor event: \"jobs\"</summary> <event>job 3 done</event> </task-notification>"));
+        assert_eq!(names(&rows).len(), 2);
+        rows.push(queued("<task-notification> <task-id>mon</task-id> <summary>Monitor event</summary> <event>[Monitor expired after 30m with no events delivered.]</event>"));
+        assert_eq!(names(&rows), ["Render the excerpt"]);
+        // One notification can stop several tasks.
+        rows.push(queued("<task-notification> <task-id>agent1</task-id> <task-id>other</task-id> <status>stopped</status>"));
+        assert!(names(&rows).is_empty());
     }
 
     #[test]
