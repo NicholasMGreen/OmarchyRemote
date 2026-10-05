@@ -179,10 +179,19 @@
           return;
         this.nativeInput.dismiss();
       });
+      this.fromBottom = 0;
       this.messages.onscroll = () => {
-        this.following =
-          this.messages.scrollHeight - this.messages.scrollTop - this.messages.clientHeight < 80;
+        const m = this.messages;
+        this.fromBottom = m.scrollHeight - m.scrollTop - m.clientHeight;
+        this.following = this.fromBottom < 80;
       };
+      // Like Herdr: when the keyboard or the message box changes the conversation's height, the
+      // text above the bottom edge stays put, so raising the keyboard pushes it up.
+      this.resized = new ResizeObserver(() => {
+        const m = this.messages;
+        m.scrollTop = m.scrollHeight - m.clientHeight - (this.following ? 0 : this.fromBottom);
+      });
+      this.resized.observe(this.messages);
     }
     connect() {
       this.socket();
@@ -592,6 +601,7 @@
     }
     dispose() {
       this.disposed = true;
+      this.resized.disconnect();
       clearTimeout(this.retry);
       clearTimeout(this.listTimer);
       this.ws?.close();

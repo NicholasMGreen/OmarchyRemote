@@ -358,3 +358,38 @@ test("a chat's folder opens in Files", async ({ page }) => {
   await app.getByRole('button', { name: 'Open chat folder' }).click();
   await expect(page.locator('#remote-files-app')).toBeVisible();
 });
+
+test('raising the keyboard pushes the conversation up, keeping the latest message in view', async ({
+  page,
+}) => {
+  const { app, state } = await setup(page);
+  state.conversations[ID].entries = Array.from({ length: 40 }, (_, i) =>
+    entry(i % 2 ? 'assistant' : 'user', `Message ${i + 1}`)
+  );
+  await app.locator('.chat-row').click();
+  const messages = app.locator('.chat-messages');
+  const last = app.locator('.chat-message:not(.streaming)').last();
+  const visible = async locator => {
+    const [box, view] = await Promise.all([locator.boundingBox(), messages.boundingBox()]);
+    return !!box && !!view && box.y >= view.y && box.y + box.height <= view.y + view.height + 1;
+  };
+  await expect.poll(() => visible(last)).toBe(true);
+  const fromBottom = () =>
+    messages.evaluate(e => Math.round(e.scrollHeight - e.scrollTop - e.clientHeight));
+  await app.getByRole('button', { name: 'Write a message' }).click();
+  await expect(app.locator('textarea.native-input')).toBeFocused();
+  // The conversation got shorter; it scrolled with it instead of hiding the latest message.
+  await expect.poll(() => visible(last)).toBe(true);
+  await expect.poll(fromBottom).toBe(0);
+  // Reading further up, the same text stays the same distance above the message box.
+  await app.locator('.chat-message').first().click();
+  await expect(app.locator('textarea.native-input')).toBeHidden();
+  await messages.evaluate(e => {
+    e.scrollTop = e.scrollHeight - e.clientHeight - 200;
+    e.dispatchEvent(new Event('scroll'));
+  });
+  const before = await fromBottom();
+  await app.getByRole('button', { name: 'Write a message' }).click();
+  await expect(app.locator('textarea.native-input')).toBeFocused();
+  await expect.poll(fromBottom).toBe(before);
+});
