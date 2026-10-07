@@ -1071,6 +1071,7 @@
       });
       this.resizeObserver = new ResizeObserver(() => {
         if (this.lastRead) this.renderOutput(this.lastRead, true);
+        this.sizePane();
       });
       this.resizeObserver.observe(this.output);
       this.splitObserver = new ResizeObserver(() => this.layout(root.clientWidth >= 700));
@@ -1143,7 +1144,11 @@
       ws.onopen = () => {
         // A new connection starts at the normal depth; ask again if reading history.
         this.deepHistory = false;
-        if (this.selected) this.send({ type: 'select', pane_id: this.selected });
+        if (this.selected) {
+          this.send({ type: 'select', pane_id: this.selected });
+          this.paneSize = null;
+          this.sizePane();
+        }
         this.syncHistory();
       };
       ws.onmessage = event => {
@@ -1393,6 +1398,9 @@
       this.inputStatus.textContent = '';
       this.deepHistory = false;
       this.send({ type: 'select', pane_id: id });
+      // Another device may have sized it since; this view sizes it again once shown.
+      this.paneSize = null;
+      this.sizePane();
       if (id) {
         const pane = this.snapshot?.panes.find(p => p.pane_id === id);
         if (pane) this.showDetail(pane);
@@ -1470,6 +1478,41 @@
       const panes = this.snapshot ? orderHerdr(this.snapshot).flatMap(g => g.panes) : [];
       const i = panes.findIndex(p => p.pane_id === this.selected);
       if (i >= 0 && panes[i + delta]) this.select(panes[i + delta].pane_id);
+    }
+    /* Like a terminal window, the open pane takes this view's size: it is laid out at the width
+       shown here, and follows rotation, tiling, and the window moving between devices. An
+       on-screen keyboard covering the view leaves its height alone, so programs do not redraw
+       each time it opens. */
+    sizePane(now = false) {
+      clearTimeout(this.sizeTimer);
+      if (!now) {
+        this.sizeTimer = setTimeout(() => this.sizePane(true), 300);
+        return;
+      }
+      const pane = this.selected;
+      const view = this.term.nativeView;
+      if (!pane || this.detail.hidden || document.hidden || !view.scroller.clientWidth) return;
+      const cols = Math.floor(view.scroller.clientWidth / view.width);
+      let rows = Math.floor(view.scroller.clientHeight / view.height);
+      const keyboard = document.documentElement.classList.contains('system-keyboard-open');
+      if (keyboard && this.windowRows) rows = this.windowRows;
+      else this.windowRows = rows;
+      if (cols < 20 || rows < 5) return;
+      const size = { cols: Math.min(500, cols), rows: Math.min(200, rows) };
+      if (
+        this.paneSize?.pane === pane &&
+        this.paneSize.cols === size.cols &&
+        this.paneSize.rows === size.rows
+      )
+        return;
+      if (this.send({ type: 'size', pane_id: pane, ...size })) this.paneSize = { pane, ...size };
+    }
+    show(visible) {
+      if (visible && !this.visible) {
+        this.paneSize = null;
+        this.sizePane();
+      }
+      this.visible = visible;
     }
     // Full-screen programs such as Vim lay out their own screen, so they are never wrapped.
     applyFit() {
@@ -1696,6 +1739,7 @@
       this.ws?.close();
       this.resizeObserver.disconnect();
       this.splitObserver.disconnect();
+      clearTimeout(this.sizeTimer);
       this.stopTouchScroll();
       this.nativeInput.dispose();
       this.term.dispose();

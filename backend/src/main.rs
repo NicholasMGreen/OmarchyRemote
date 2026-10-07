@@ -430,6 +430,19 @@ async fn herdr_socket(mut socket: WebSocket, herdr: herdr::Herdr) {
     let mut active = std::time::Instant::now();
     let mut quiet_ticks = 0u32;
     let mut last_pong = std::time::Instant::now();
+    // One controller at a time sizes the pane, always to the latest size the window asked for.
+    let (sizes, mut wanted) = tokio::sync::watch::channel(None::<(String, u16, u16)>);
+    let sizer = herdr.clone();
+    tokio::spawn(async move {
+        while wanted.changed().await.is_ok() {
+            let Some((pane, cols, rows)) = wanted.borrow_and_update().clone() else {
+                continue;
+            };
+            if let Err(e) = sizer.resize(&pane, cols, rows).await {
+                eprintln!("herdr: could not size {pane}: {e}");
+            }
+        }
+    });
     loop {
         tokio::select! {
             _=snapshots.tick()=>{
@@ -468,6 +481,14 @@ async fn herdr_socket(mut socket: WebSocket, herdr: herdr::Herdr) {
                         Some("select")=>{selected=v["pane_id"].as_str().filter(|s|s.len()<128).map(str::to_owned);previous=None;history=false;active=std::time::Instant::now();},
                         // Deeper history while the phone reads older output; resend at once at the new depth.
                         Some("history")=>{history=v["deep"].as_bool().unwrap_or(false);previous=None;active=std::time::Instant::now();},
+                        // The open pane takes the size of the window showing it.
+                        Some("size")=>{
+                            let size=|key:&str,max:u64|v[key].as_u64().filter(|n|(5..=max).contains(n)).map(|n|n as u16);
+                            if let (Some(pane),Some(cols),Some(rows))=(selected.clone().filter(|s|v["pane_id"]==s.as_str()),size("cols",500),size("rows",200)) {
+                                sizes.send_replace(Some((pane,cols,rows)));
+                                active=std::time::Instant::now();
+                            }
+                        },
                         Some("input")=>{
                             // Target travels with each key; switching panes never redirects queued input.
                             let result=async {

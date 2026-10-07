@@ -2,11 +2,13 @@ use anyhow::{Result, bail};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
+    process::Stdio,
     time::Duration,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
+    process::Command,
     time::timeout,
 };
 
@@ -102,6 +104,42 @@ impl Herdr {
                 .map(|all| all.iter().map(|p| p["name"].clone()).collect::<Vec<_>>())
                 .unwrap_or_default()
         ))
+    }
+    /// Sizes a pane's terminal to the window showing it, as a terminal window would. Without a
+    /// desktop client Herdr gives new panes its small fallback screen, and its socket API has no
+    /// size; a terminal controller takes the size, then lets go, and the pane keeps it. A pane
+    /// another controller owns is left alone.
+    pub async fn resize(&self, pane: &str, cols: u16, rows: u16) -> Result<()> {
+        let mut child = Command::new(crate::apps::resolve_program("herdr")?)
+            .args(["terminal", "session", "control", pane, "--cols"])
+            .arg(cols.to_string())
+            .arg("--rows")
+            .arg(rows.to_string())
+            .env("HERDR_SOCKET_PATH", &self.path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        let mut stdin = child.stdin.take().unwrap();
+        let mut frames = BufReader::new(child.stdout.take().unwrap()).lines();
+        let mut stderr = child.stderr.take().unwrap();
+        timeout(Duration::from_secs(5), async {
+            // The first frame means the controller is attached at the new size.
+            if frames.next_line().await?.is_none() {
+                let mut message = String::new();
+                stderr.read_to_string(&mut message).await?;
+                bail!("Herdr: {}", message.trim());
+            }
+            stdin
+                .write_all(b"{\"type\":\"terminal.release\"}\n")
+                .await?;
+            drop(stdin);
+            while frames.next_line().await?.is_some() {}
+            child.wait().await?;
+            Ok(())
+        })
+        .await?
     }
     pub async fn create_workspace(&self, cwd: &Path) -> Result<Value> {
         let created = self
