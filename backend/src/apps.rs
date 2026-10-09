@@ -120,6 +120,7 @@ const SERVICES: &[(&str, &str, &[&str])] = &[
         "Herdr",
         &["workspaces", "agents", "panes", "input"],
     ),
+    ("chat", "Chat", &["conversations", "stream", "stop"]),
 ];
 
 pub fn tui(id: &str) -> Option<&'static HostApp> {
@@ -167,7 +168,7 @@ pub fn data_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-fn resolve_program(program: &str) -> Result<PathBuf> {
+pub(crate) fn resolve_program(program: &str) -> Result<PathBuf> {
     let path = PathBuf::from(program);
     if path.is_absolute() {
         return Ok(path);

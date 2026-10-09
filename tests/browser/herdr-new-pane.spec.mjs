@@ -131,3 +131,127 @@ test('a failed start keeps the chooser open with the host error', async ({ page:
   await expect(picker.locator('.files-status')).toHaveText('Herdr: socket unavailable');
   await expect(picker.getByRole('button', { name: 'start here in ~', exact: true })).toBeEnabled();
 });
+
+for (const viewport of [
+  { width: 402, height: 874, where: 'the pane header' },
+  { width: 1194, height: 834, where: 'the workspace header in the sidebar' },
+]) {
+  test(`a new tab starts in the open pane's workspace from ${viewport.where}`, async ({
+    page: p,
+  }) => {
+    await p.setViewportSize(viewport);
+    await p.route('**/api/**', r => r.abort());
+    await p.route(
+      url => url.pathname === '/api/files',
+      r =>
+        r.fulfill({
+          json: listing(new URL(r.request().url()).searchParams.get('path') || home),
+        })
+    );
+    const snapshot = {
+      workspaces: [{ workspace_id: 'qa', label: 'Existing QA' }],
+      tabs: [{ tab_id: 'qa:t1', label: '1' }],
+      panes: [{ ...pane('qa:p1', 'qa', 'Existing agent'), cwd: home + '/project' }],
+    };
+    const created = [];
+    await p.route('**/api/herdr/workspaces/*/tabs', r => {
+      created.push([new URL(r.request().url()).pathname, r.request().postDataJSON()]);
+      r.fulfill({
+        json: {
+          pane: { ...pane('qa:p2', 'qa', 'New tab shell'), tab_id: 'qa:t2' },
+          snapshot: {
+            ...snapshot,
+            tabs: [...snapshot.tabs, { tab_id: 'qa:t2', label: '2' }],
+            panes: [
+              ...snapshot.panes,
+              { ...pane('qa:p2', 'qa', 'New tab shell'), tab_id: 'qa:t2' },
+            ],
+          },
+        },
+      });
+    });
+    const selected = [];
+    await p.routeWebSocket('**/api/herdr/ws', ws => {
+      ws.send(JSON.stringify({ type: 'snapshot', snapshot }));
+      ws.onMessage(raw => {
+        const m = JSON.parse(raw);
+        if (m.type === 'select') selected.push(m.pane_id);
+      });
+    });
+    await p.goto('/native/');
+    await p.keyboard.press('Meta+Shift+A');
+    const herdr = p.locator('#remote-herdr-app');
+    await herdr.locator('.herdr-pane').click();
+    await expect(herdr.locator('.herdr-detail')).toBeVisible();
+    const add =
+      viewport.width > 600
+        ? herdr.getByRole('button', { name: 'New tab in Existing QA', exact: true })
+        : herdr.getByRole('button', { name: 'New tab in this workspace', exact: true });
+    await add.click();
+    // The chooser opens in the pane's folder, so starting there is one tap.
+    const picker = herdr.locator('.herdr-folder-picker');
+    await expect(picker.getByRole('heading', { name: 'New tab' })).toBeVisible();
+    await expect(picker.locator('.files-path')).toHaveAttribute('data-path', home + '/project');
+    await picker.getByRole('button', { name: 'start here in ~/project', exact: true }).click();
+    await expect(picker).toHaveCount(0);
+    expect(created).toEqual([['/api/herdr/workspaces/qa/tabs', { cwd: home + '/project' }]]);
+    await expect.poll(() => selected.at(-1)).toBe('qa:p2');
+  });
+}
+
+for (const width of [402, 1194]) {
+  test(`open the selected pane folder in Files at ${width}px`, async ({ page: p }) => {
+    await p.setViewportSize({ width, height: 874 });
+    await p.route('**/api/**', r => r.abort());
+    await p.route(
+      url => url.pathname === '/api/files',
+      r => r.fulfill({ json: listing(new URL(r.request().url()).searchParams.get('path') || home) })
+    );
+    const snapshot = {
+      workspaces: [{ workspace_id: 'qa', label: 'Project' }],
+      tabs: [{ tab_id: 'qa:t1', label: 'Agent' }],
+      panes: [{ ...pane('qa:p1', 'qa', 'Agent'), cwd: home, foreground_cwd: home + '/project' }],
+    };
+    await p.routeWebSocket('**/api/herdr/ws', ws => {
+      ws.send(JSON.stringify({ type: 'snapshot', snapshot }));
+    });
+    await p.goto('/native/');
+    await p.keyboard.press('Meta+Shift+A');
+    const herdr = p.locator('#remote-herdr-app');
+    await herdr.locator('.herdr-pane').click();
+    const folder = herdr.getByRole('button', { name: 'Open pane folder in Files' });
+    await expect(folder).toBeVisible();
+    if (width > 600) {
+      const controls = herdr.locator('.herdr-search-field .herdr-toolbar-key');
+      await expect(controls).toHaveCount(4);
+      const styles = await controls.evaluateAll(elements =>
+        elements.map(el => {
+          const style = getComputedStyle(el);
+          const svg = el.querySelector('svg');
+          return [
+            style.width,
+            style.height,
+            style.color,
+            style.borderRadius,
+            svg.getAttribute('stroke-width'),
+            svg.getAttribute('width'),
+          ];
+        })
+      );
+      expect(styles[1]).toEqual(styles[0]);
+      expect(styles[2]).toEqual(styles[0]);
+      await herdr.getByRole('button', { name: 'Focus pane search' }).click();
+      await expect(herdr.getByRole('searchbox', { name: 'Search panes' })).toBeFocused();
+    }
+    await folder.click();
+    const files = p.locator('#remote-files-app');
+    await expect(files.locator('.files-path')).toHaveAttribute('data-path', home + '/project');
+    await files.getByRole('button', { name: 'Home folder', exact: true }).click();
+    await expect(files.locator('.files-path')).toHaveAttribute('data-path', home);
+    // Reusing Files returns to the pane's directory instead of its last visited folder.
+    await p.keyboard.press('Meta+Shift+A');
+    await folder.click();
+    await expect(files.locator('.files-path')).toHaveAttribute('data-path', home + '/project');
+    await expect(p.locator('#remote-files-app')).toHaveCount(1);
+  });
+}

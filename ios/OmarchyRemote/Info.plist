@@ -20,6 +20,8 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Use your approximate location to show local weather. Your city-level location is sent to your Omarchy Remote server to fetch the forecast.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Record dictation and send the audio to your connected host for transcription into your message draft.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Take a photo to attach to your message. Photos you choose are uploaded to your Omarchy Remote server.</string>
 	<key>OmarchyRemoteURL</key>

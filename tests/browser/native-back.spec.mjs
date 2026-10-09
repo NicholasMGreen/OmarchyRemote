@@ -117,3 +117,112 @@ for (const platform of ['android', 'ios']) {
     await expect.poll(current).toBe('settings');
   });
 }
+
+// With the device setting on, edges are Back and Forward and never switch workspaces.
+for (const platform of ['android', 'ios']) {
+  test(`edge navigation on ${platform}: the edges go back and forward inside apps`, async ({
+    page: p,
+  }) => {
+    await p.setViewportSize({ width: 402, height: 874 });
+    if (platform === 'android')
+      await p.addInitScript(() => (window.__OMARCHY_PLATFORM__ = 'android'));
+    await p.route('**/api/**', r => r.abort());
+    await p.route(
+      url => url.pathname === '/api/files',
+      r => r.fulfill({ json: listing(new URL(r.request().url()).searchParams.get('path') || home) })
+    );
+    await p.routeWebSocket('**/api/herdr/ws', ws =>
+      ws.send(JSON.stringify({ type: 'snapshot', snapshot }))
+    );
+    await p.goto('/native/');
+    const current = () =>
+      p.evaluate(
+        () => document.querySelector('[data-workspace][data-active="true"]')?.dataset.workspace
+      );
+    const swipe = async (fromX, toX) => {
+      await p.mouse.move(fromX, 150);
+      await p.mouse.down();
+      await p.mouse.move(toX, 150, { steps: 8 });
+      await p.mouse.up();
+      await p.waitForTimeout(600);
+    };
+    // Android's right-edge swipe arrives as nativeNext(); elsewhere the shell sees the swipe.
+    const forward = () =>
+      platform === 'android' ? p.evaluate(() => window.HyprlandDesk.nativeNext()) : swipe(399, 150);
+    // The setting lives in Settings, off by default.
+    await p.getByText('settings', { exact: true }).first().click();
+    const option = p.getByRole('checkbox', { name: 'Edge swipes go back and forward' });
+    await expect(option).not.toBeChecked();
+    await option.check();
+    expect(await p.evaluate(() => localStorage.getItem('omarchy-edge-navigation'))).toBe('true');
+    await p.evaluate(() => window.HyprlandDesk.nativeBack());
+    await expect.poll(current).toBe('home');
+
+    // Herdr: left leaves the thread, right returns to it, and then has nowhere further to go.
+    await p.getByText('herdr', { exact: true }).first().click();
+    await p.locator('.herdr-pane').click();
+    const thread = p.locator('#remote-herdr-app .herdr-detail');
+    await expect(thread).toBeVisible();
+    await swipe(3, 250);
+    await expect(thread).toBeHidden();
+    await expect.poll(current).toBe('herdr');
+    await forward();
+    await expect(thread).toBeVisible();
+    await forward();
+    await expect(thread).toBeVisible();
+    await expect.poll(current).toBe('herdr');
+
+    // Files: left goes up a folder and right comes back down.
+    await p.evaluate(() => window.HyprlandDesk.nativeBack());
+    await p.evaluate(() => window.HyprlandDesk.nativeBack());
+    await expect.poll(current).toBe('home');
+    await p.waitForTimeout(600);
+    await p.getByText('files', { exact: true }).first().click();
+    await p.locator('.files-app').getByRole('button', { name: 'project folder' }).click();
+    const path = p.locator('.files-path');
+    await expect(path).toHaveAttribute('data-path', home + '/project');
+    await swipe(3, 250);
+    await expect(path).toHaveAttribute('data-path', home);
+    await forward();
+    await expect(path).toHaveAttribute('data-path', home + '/project');
+
+    // Left keeps going back to Home; there, the right edge stays put instead of switching.
+    await swipe(3, 250);
+    await swipe(3, 250);
+    await expect.poll(current).toBe('home');
+    await forward();
+    await expect.poll(current).toBe('home');
+  });
+}
+
+test('an edge swipe inside Files reaches the shell, while other presses stay in Files', async ({
+  page: p,
+}) => {
+  await p.setViewportSize({ width: 402, height: 874 });
+  await p.route('**/api/**', r => r.abort());
+  await p.route(
+    url => url.pathname === '/api/files',
+    r => r.fulfill({ json: listing(new URL(r.request().url()).searchParams.get('path') || home) })
+  );
+  await p.goto('/native/');
+  const current = () =>
+    p.evaluate(
+      () => document.querySelector('[data-workspace][data-active="true"]')?.dataset.workspace
+    );
+  await p.getByText('files', { exact: true }).first().click();
+  await expect.poll(current).toBe('files');
+  await p.waitForTimeout(600);
+  const swipe = async (fromX, toX) => {
+    await p.mouse.move(fromX, 400);
+    await p.mouse.down();
+    await p.mouse.move(toX, 400, { steps: 8 });
+    await p.mouse.up();
+    await p.waitForTimeout(600);
+  };
+  // A swipe that starts inside the list is the list's own.
+  await swipe(60, 330);
+  await expect.poll(current).toBe('files');
+  // From the left edge it is the shell's: the previous workspace.
+  await swipe(3, 250);
+  await expect.poll(current).toBe('home');
+});

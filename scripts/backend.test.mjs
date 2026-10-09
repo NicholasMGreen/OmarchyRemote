@@ -98,7 +98,7 @@ test('host gateway rejects cross-site requests and unknown hosts', async () => {
     ws.on('error', () => {});
   });
   assert.equal(status, 403);
-  assert.equal((await api('capabilities')).apps.length, 10);
+  assert.equal((await api('capabilities')).apps.length, 11);
 });
 
 test('persistent real shell accepts input, resizes, and reconnects', async () => {
@@ -201,6 +201,198 @@ test('a new Herdr workspace starts its shell in a chosen home folder', async () 
   } finally {
     if (workspace) await herdr('workspace.close', { workspace_id: workspace });
     await rm(folder, { recursive: true, force: true });
+  }
+});
+
+test('a new Herdr tab joins an existing workspace in a chosen home folder', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const folder = await mkdtemp(process.env.HOME + '/omarchy-herdr-tab-test-');
+  let workspace;
+  try {
+    workspace = (await api('herdr/workspaces', { cwd: folder })).pane.workspace_id;
+    const created = await api(`herdr/workspaces/${encodeURIComponent(workspace)}/tabs`, {
+      cwd: folder,
+    });
+    assert.equal(created.pane.workspace_id, workspace);
+    assert.equal(created.pane.cwd, folder);
+    const tabs = created.snapshot.tabs.filter(t => t.workspace_id === workspace);
+    assert.equal(tabs.length, 2);
+    const post = (id, body) =>
+      fetch(`${base}/api/herdr/workspaces/${encodeURIComponent(id)}/tabs`, {
+        method: 'POST',
+        headers: { 'X-Hyprland-Client': '1', 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    // Malformed ids and folders outside home never reach Herdr; unknown workspaces are Herdr errors.
+    assert.equal((await post('../x', { cwd: folder })).status, 400);
+    assert.equal((await post(workspace, { cwd: '/tmp' })).status, 400);
+    assert.equal((await post('nonexistent', { cwd: folder })).status, 502);
+  } finally {
+    if (workspace) await herdr('workspace.close', { workspace_id: workspace });
+    await rm(folder, { recursive: true, force: true });
+  }
+});
+
+test('a pane change that keeps the text the same length still reaches the phone', async () => {
+  const created = await herdr('workspace.create', {
+    label: 'Omarchy automated test',
+    cwd: '/tmp',
+    focus: false,
+  });
+  const pane = created.root_pane.pane_id;
+  const c = await connect('herdr/ws');
+  try {
+    await new Promise(r => setTimeout(r, 1200));
+    c.send({ type: 'select', pane_id: pane });
+    const type = (id, text, keys = []) =>
+      c.send({ type: 'input', id, pane_id: pane, text, keys, typed: true });
+    type('first', 'echo SAME_A');
+    const first = await c.wait(m => m.type === 'pane' && m.read.text.includes('SAME_A'));
+    // Updates name the foreground program, so the phone knows when it is at a shell prompt.
+    assert.ok(
+      Array.isArray(first.read.foreground) && first.read.foreground.length,
+      JSON.stringify(first.read.foreground)
+    );
+    // Replacing the last character keeps the text length; the update must still be sent.
+    type('replace', '', ['Backspace', 'B']);
+    await c.wait(m => m.type === 'pane' && m.read.text.includes('SAME_B'));
+  } finally {
+    c.ws.close();
+    await herdr('workspace.close', { workspace_id: created.workspace.workspace_id });
+  }
+});
+
+test('reading back loads up to 1000 lines of a pane and following returns to 300', async () => {
+  const created = await herdr('workspace.create', {
+    label: 'Omarchy automated test',
+    cwd: '/tmp',
+    focus: false,
+  });
+  const pane = created.root_pane.pane_id;
+  const c = await connect('herdr/ws');
+  const lines = m => m.read.text.split('\n').length;
+  try {
+    await new Promise(r => setTimeout(r, 1200));
+    c.send({ type: 'select', pane_id: pane });
+    c.send({
+      type: 'input',
+      id: 'fill',
+      pane_id: pane,
+      text: "seq -f 'history line %g' 1 2000",
+      keys: ['Enter'],
+      typed: true,
+    });
+    await c.wait(m => m.type === 'pane' && m.read.text.includes('history line 2000'));
+    await new Promise(r => setTimeout(r, 300));
+    const following = c.messages.filter(m => m.type === 'pane').at(-1);
+    assert.ok(lines(following) <= 300, String(lines(following)));
+    c.messages.length = 0;
+    c.send({ type: 'history', deep: true });
+    const deep = await c.wait(m => m.type === 'pane');
+    assert.equal(lines(deep), 1000);
+    assert.ok(deep.read.text.includes('history line 1100'));
+    c.messages.length = 0;
+    c.send({ type: 'history', deep: false });
+    const back = await c.wait(m => m.type === 'pane');
+    assert.ok(lines(back) <= 300, String(lines(back)));
+  } finally {
+    c.ws.close();
+    await herdr('workspace.close', { workspace_id: created.workspace.workspace_id });
+  }
+});
+
+test('a full-screen program is reported so the phone keeps its layout', async () => {
+  const created = await herdr('workspace.create', {
+    label: 'Omarchy automated test',
+    cwd: '/tmp',
+    focus: false,
+  });
+  const pane = created.root_pane.pane_id;
+  const c = await connect('herdr/ws');
+  const type = (id, text, keys = ['Enter']) =>
+    c.send({ type: 'input', id, pane_id: pane, text, keys, typed: true });
+  try {
+    await new Promise(r => setTimeout(r, 1200));
+    c.send({ type: 'select', pane_id: pane });
+    // Enough output to scroll, so the shell has history that the full-screen program hides.
+    type('fill', "seq -f 'shell line %g' 1 200");
+    const shell = await c.wait(m => m.type === 'pane' && m.read.text.includes('shell line 200'));
+    assert.equal(shell.read.fullscreen, false);
+    type('less', 'seq -f "pager line %g" 1 500 | less');
+    await c.wait(
+      m => m.type === 'pane' && m.read.text.includes('pager line 1') && m.read.fullscreen
+    );
+    type('quit', 'q', []);
+    await c.wait(m => m.type === 'pane' && m.read.fullscreen === false);
+  } finally {
+    c.ws.close();
+    await herdr('workspace.close', { workspace_id: created.workspace.workspace_id });
+  }
+});
+
+test('a message naming an image presses Return after the paste, not with it', async () => {
+  const created = await herdr('workspace.create', {
+    label: 'Omarchy automated test',
+    cwd: '/tmp',
+    focus: false,
+  });
+  const pane = created.root_pane.pane_id;
+  const input = body => api(`herdr/panes/${encodeURIComponent(pane)}/input`, body);
+  const screen = async () => (await api(`herdr/panes/${encodeURIComponent(pane)}`)).text;
+  try {
+    await new Promise(r => setTimeout(r, 1200));
+    await input({ text: 'cat', keys: ['Enter'], typed: true });
+    await new Promise(r => setTimeout(r, 600));
+    // A shell shows no attachments, so Return follows once the screen settles.
+    const started = Date.now();
+    await input({ text: 'see Image: /tmp/omarchy-test-picture.png', keys: ['Enter'] });
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed >= 500 && elapsed < 4500, String(elapsed));
+    let lines = [];
+    for (let i = 0; i < 20; i++) {
+      lines = (await screen()).split('\n').map(l => l.replace(/\x1b\[[0-9;]*m/g, '').trim());
+      if (lines.filter(l => l === 'see Image: /tmp/omarchy-test-picture.png').length >= 2) break;
+      await new Promise(r => setTimeout(r, 150));
+    }
+    // cat echoes the line back only after Return arrives.
+    assert.equal(
+      lines.filter(l => l === 'see Image: /tmp/omarchy-test-picture.png').length,
+      2,
+      lines.join('\n')
+    );
+  } finally {
+    await herdr('workspace.close', { workspace_id: created.workspace.workspace_id });
+  }
+});
+
+test('Keys-mode input is typed while messages are pasted', async () => {
+  const created = await herdr('workspace.create', {
+    label: 'Omarchy automated test',
+    cwd: '/tmp',
+    focus: false,
+  });
+  const workspace = created.workspace.workspace_id;
+  const pane = created.root_pane.pane_id;
+  const input = body => api(`herdr/panes/${encodeURIComponent(pane)}/input`, body);
+  const screen = async () => (await api(`herdr/panes/${encodeURIComponent(pane)}`)).text;
+  try {
+    await new Promise(r => setTimeout(r, 1200));
+    // A program that asks for bracketed paste sees pastes wrapped in ESC[200~ … ESC[201~.
+    await input({ text: "printf '\\e[?2004h'; cat -v", keys: ['Enter'], typed: true });
+    await new Promise(r => setTimeout(r, 600));
+    await input({ text: 'typed', typed: true });
+    await input({ text: '', keys: ['Enter'], typed: true });
+    await input({ text: 'pasted', keys: ['Enter'] });
+    let text = '';
+    for (let i = 0; i < 20 && !/pasted/.test(text); i++) {
+      await new Promise(r => setTimeout(r, 150));
+      text = await screen();
+    }
+    const lines = text.split('\n').map(l => l.replace(/\x1b\[[0-9;]*m/g, '').trim());
+    assert.ok(lines.includes('typed'), lines.join('\n'));
+    assert.ok(lines.includes('^[[200~pasted^[[201~'), lines.join('\n'));
+  } finally {
+    await herdr('workspace.close', { workspace_id: workspace });
   }
 });
 
@@ -441,4 +633,18 @@ test('Files Trash is recoverable and contains the selected fixture bytes', async
     }
     await rm(folder, { recursive: true, force: true });
   }
+});
+
+test('dictation advertises its provider and refuses non-audio uploads', async () => {
+  const provider = await api('dictation');
+  assert.equal(typeof provider.available, 'boolean');
+  assert.equal(typeof provider.provider, 'string');
+  assert.equal(provider.max_seconds, 120);
+  const response = await fetch(base + '/api/dictation', {
+    method: 'POST',
+    headers: { 'X-Hyprland-Client': '1', 'Content-Type': 'application/octet-stream' },
+    body: 'not an audio recording',
+  });
+  assert.equal(response.status, 400);
+  assert.match((await response.json()).error, /recording format/);
 });

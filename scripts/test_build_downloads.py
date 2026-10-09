@@ -45,6 +45,26 @@ class BuildDownloadsTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 publisher.publish(ipa, output, 'http://example.test/builds', '', 'abc123')
 
+    def test_visionos_publication_is_download_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ipa = root / 'vision.ipa'
+            info = dict(DTPlatformName='xros', CFBundleVersion='41',
+                        CFBundleShortVersionString='1.0', CFBundleIdentifier='example.app',
+                        UIDeviceFamily=[7])
+            with zipfile.ZipFile(ipa, 'w') as archive:
+                archive.writestr('Payload/Test.app/Info.plist', plistlib.dumps(info))
+                archive.writestr('Payload/Test.app/embedded.mobileprovision', b'test')
+            profile = plistlib.dumps(dict(ExpirationDate=datetime.datetime(2099, 1, 1)))
+            output = root / 'downloads'
+            with patch.object(publisher.subprocess, 'run', return_value=types.SimpleNamespace(stdout=profile)):
+                entry = publisher.publish(ipa, output, 'https://example.test/builds', 'Vision update', 'abc123')
+            self.assertEqual(entry['platform'], 'visionos')
+            self.assertEqual(entry['devices'], ['Vision Pro'])
+            self.assertEqual((output / entry['id'] / 'app.ipa').read_bytes(), ipa.read_bytes())
+            self.assertFalse((output / entry['id'] / 'manifest.plist').exists())
+            self.assertNotIn('itms-services://', (output / 'index.html').read_text())
+
     def test_android_publication_verifies_signature_and_keeps_mixed_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

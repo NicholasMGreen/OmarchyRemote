@@ -1,13 +1,16 @@
 mod ansi;
 mod apps;
 mod browser;
+mod chat;
 mod codexbar;
+mod dictation;
 mod files;
 mod files_ops;
 mod herdr;
 mod preferences;
 mod terminal;
 mod uploads;
+mod voice;
 mod widgets;
 mod willreset;
 
@@ -41,6 +44,7 @@ struct App {
     herdr: herdr::Herdr,
     widgets: widgets::Widgets,
     preferences: preferences::Shared,
+    chats: chat::Chats,
 }
 type ApiError = (StatusCode, Json<Value>);
 fn error(e: impl std::fmt::Display) -> ApiError {
@@ -317,6 +321,9 @@ struct PaneInput {
     text: String,
     #[serde(default)]
     keys: Vec<String>,
+    /// Keys mode: deliver as typing rather than as a paste.
+    #[serde(default)]
+    typed: bool,
 }
 fn validate_input(input: &PaneInput) -> Result<(), ApiError> {
     if input.text.len() > 16384 || input.keys.len() > 32 || input.keys.iter().any(|k| k.len() > 64)
@@ -336,7 +343,7 @@ async fn pane_input(
     validate_input(&input)?;
     Ok(Json(
         app.herdr
-            .input(&id, &input.text, &input.keys)
+            .input(&id, &input.text, &input.keys, input.typed)
             .await
             .map_err(error)?,
     ))
@@ -364,51 +371,134 @@ async fn new_workspace(
     let snapshot = app.herdr.snapshot().await.ok();
     Ok(Json(json!({"pane":pane,"snapshot":snapshot})))
 }
+fn workspace_id(id: &str) -> Result<&str, ApiError> {
+    if id.is_empty()
+        || id.len() > 64
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '-'))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error":"Unknown workspace"})),
+        ));
+    }
+    Ok(id)
+}
+/* A new tab in an existing workspace starts one shell in the chosen folder. */
+async fn new_tab(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(request): Json<NewWorkspace>,
+) -> Result<Json<Value>, ApiError> {
+    let workspace = workspace_id(&id)?;
+    let root = files::root().map_err(error)?;
+    let path = workspace_folder(&root, &request.cwd)?;
+    let pane = app
+        .herdr
+        .create_tab(workspace, &path)
+        .await
+        .map_err(error)?;
+    let snapshot = app.herdr.snapshot().await.ok();
+    Ok(Json(json!({"pane":pane,"snapshot":snapshot})))
+}
 async fn herdr_upgrade(State(app): State<App>, ws: WebSocketUpgrade) -> Response {
     ws.max_message_size(32768)
         .on_upgrade(move |socket| herdr_socket(socket, app.herdr))
 }
+/* Keystrokes should echo like a local terminal, but Herdr offers no output stream for a pane, only
+cheap reads (well under a millisecond). The selected pane is read every 16 ms for a second after
+each keystroke and every ~100 ms otherwise, so streaming output is not sent sixty times a second.
+A read is sent only when its text changes; Herdr's revision does not track content. */
+const PANE_ACTIVE: Duration = Duration::from_millis(16);
+const PANE_QUIET_AFTER: Duration = Duration::from_secs(1);
+const PANE_QUIET_EVERY: u32 = 6;
+/* Reading history (the phone scrolled away from the latest output) sends up to Herdr's 1000 lines,
+about 50 KB, so changes are then sent at most every ~0.5 s. */
+const HISTORY_EVERY: u32 = 30;
 async fn herdr_socket(mut socket: WebSocket, herdr: herdr::Herdr) {
-    let mut tick = interval(Duration::from_millis(300));
-    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut snapshots = interval(Duration::from_millis(1200));
+    snapshots.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut reads = interval(PANE_ACTIVE);
+    reads.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut heartbeat = interval(Duration::from_secs(15));
+    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut selected: Option<String> = None;
-    let mut previous = String::new();
+    let mut previous: Option<String> = None;
+    let mut history = false;
     let mut previous_snapshot = String::new();
-    let mut ticks = 0u32;
+    let mut active = std::time::Instant::now();
+    let mut quiet_ticks = 0u32;
     let mut last_pong = std::time::Instant::now();
+    // One controller at a time sizes the pane, always to the latest size the window asked for.
+    let (sizes, mut wanted) = tokio::sync::watch::channel(None::<(String, u16, u16)>);
+    let sizer = herdr.clone();
+    tokio::spawn(async move {
+        while wanted.changed().await.is_ok() {
+            let Some((pane, cols, rows)) = wanted.borrow_and_update().clone() else {
+                continue;
+            };
+            if let Err(e) = sizer.resize(&pane, cols, rows).await {
+                eprintln!("herdr: could not size {pane}: {e}");
+            }
+        }
+    });
     loop {
         tokio::select! {
-            _=tick.tick()=>{
-                if ticks.is_multiple_of(4) {
-                    match herdr.snapshot().await {
-                        Ok(snapshot)=>{let encoded=snapshot.to_string();if encoded!=previous_snapshot {previous_snapshot=encoded;if !send(&mut socket,json!({"type":"snapshot","snapshot":snapshot})).await{break}}},
-                        Err(e)=>{previous_snapshot.clear();if !send(&mut socket,json!({"type":"error","message":e.to_string()})).await{break}},
-                    }
+            _=snapshots.tick()=>{
+                match herdr.snapshot().await {
+                    Ok(snapshot)=>{let encoded=snapshot.to_string();if encoded!=previous_snapshot {previous_snapshot=encoded;if !send(&mut socket,json!({"type":"snapshot","snapshot":snapshot})).await{break}}},
+                    Err(e)=>{previous_snapshot.clear();if !send(&mut socket,json!({"type":"error","message":e.to_string()})).await{break}},
                 }
-                ticks=ticks.wrapping_add(1);
-                if let Some(ref pane)=selected {
-                    match herdr.read(pane).await {
-                        Ok(read)=>{let text=read["text"].as_str().unwrap_or("").to_owned();if text!=previous {previous=text;if !send(&mut socket,json!({"type":"pane","pane_id":pane,"read":read})).await{break}}},
-                        Err(e)=>{if !send(&mut socket,json!({"type":"pane_error","pane_id":pane,"message":e.to_string()})).await{break}selected=None;},
-                    }
+            },
+            _=reads.tick()=>{
+                let Some(ref pane)=selected else { continue };
+                if active.elapsed()>PANE_QUIET_AFTER {
+                    quiet_ticks=quiet_ticks.wrapping_add(1);
+                    if !quiet_ticks.is_multiple_of(if history {HISTORY_EVERY} else {PANE_QUIET_EVERY}){continue}
                 }
-                if ticks.is_multiple_of(50){
-                    if last_pong.elapsed()>Duration::from_secs(45){break}
-                    if !matches!(timeout(Duration::from_secs(5),socket.send(Message::Ping(Vec::new().into()))).await,Ok(Ok(()))){break}
+                match herdr.read_lines(pane,if history {herdr::HISTORY_LINES} else {herdr::PANE_LINES}).await {
+                    Ok(mut read)=>{
+                        let text=read["text"].as_str().unwrap_or_default();
+                        if previous.as_deref()!=Some(text) {
+                            previous=Some(text.to_owned());
+                            // The client draws a cursor only for a shell prompt; see HerdrApp.
+                            read["foreground"]=herdr.foreground(pane).await.unwrap_or(Value::Null);
+                            read["fullscreen"]=json!(herdr.fullscreen(pane,previous.as_deref().unwrap_or_default()).await.unwrap_or(false));
+                            if !send(&mut socket,json!({"type":"pane","pane_id":pane,"read":read})).await{break}
+                        }
+                    },
+                    Err(e)=>{if !send(&mut socket,json!({"type":"pane_error","pane_id":pane,"message":e.to_string()})).await{break}selected=None;},
                 }
+            },
+            _=heartbeat.tick()=>{
+                if last_pong.elapsed()>Duration::from_secs(45){break}
+                if !matches!(timeout(Duration::from_secs(5),socket.send(Message::Ping(Vec::new().into()))).await,Ok(Ok(()))){break}
             },
             event=socket.next()=>match event {
                 Some(Ok(Message::Text(text)))=>{
                     if let Ok(v)=serde_json::from_str::<Value>(&text) {match v["type"].as_str(){
-                        Some("select")=>{selected=v["pane_id"].as_str().filter(|s|s.len()<128).map(str::to_owned);previous.clear();},
+                        Some("select")=>{selected=v["pane_id"].as_str().filter(|s|s.len()<128).map(str::to_owned);previous=None;history=false;active=std::time::Instant::now();},
+                        // Deeper history while the phone reads older output; resend at once at the new depth.
+                        Some("history")=>{history=v["deep"].as_bool().unwrap_or(false);previous=None;active=std::time::Instant::now();},
+                        // The open pane takes the size of the window showing it.
+                        Some("size")=>{
+                            let size=|key:&str,max:u64|v[key].as_u64().filter(|n|(5..=max).contains(n)).map(|n|n as u16);
+                            if let (Some(pane),Some(cols),Some(rows))=(selected.clone().filter(|s|v["pane_id"]==s.as_str()),size("cols",500),size("rows",200)) {
+                                sizes.send_replace(Some((pane,cols,rows)));
+                                active=std::time::Instant::now();
+                            }
+                        },
                         Some("input")=>{
                             // Target travels with each key; switching panes never redirects queued input.
                             let result=async {
                                 let target=v["pane_id"].as_str().ok_or_else(||error("Missing pane"))?;
                                 if selected.as_deref()!=Some(target){return Err(error("Pane changed; input was not sent"))}
                                 let input:PaneInput=serde_json::from_value(v.clone()).map_err(error)?;validate_input(&input)?;
-                                herdr.input(target,&input.text,&input.keys).await.map_err(error)
+                                herdr.input(target,&input.text,&input.keys,input.typed).await.map_err(error)
                             }.await;
+                            // Typing makes the pane active, so its echo is read within one fast tick.
+                            active=std::time::Instant::now();
                             match result {Ok(_)=>{if !send(&mut socket,json!({"type":"ack","id":v["id"]})).await{break}},Err((_,Json(e)))=>{if !send(&mut socket,json!({"type":"input_error","id":v["id"],"message":e["error"]})).await{break}}}
                         },_=>{},}}
                 },Some(Ok(Message::Pong(_)))=>{last_pong=std::time::Instant::now()},Some(Ok(Message::Ping(bytes)))=>{if socket.send(Message::Pong(bytes)).await.is_err(){break}},_=>break,
@@ -449,9 +539,16 @@ async fn main() -> anyhow::Result<()> {
         preferences: Arc::new(Mutex::new(preferences::Store::open(
             &apps::data_dir()?.join("settings.sqlite3"),
         )?)),
+        chats: chat::start(),
     };
     let router = Router::new()
         .route("/api/capabilities", get(capabilities))
+        .route(
+            "/api/dictation",
+            get(dictation::status)
+                .post(dictation::transcribe)
+                .layer(DefaultBodyLimit::max(dictation::MAX_BYTES)),
+        )
         .route("/api/state", get(preferences::snapshot))
         .route("/api/state/webapps", post(preferences::change))
         .route("/api/state/devices", get(preferences::devices))
@@ -495,8 +592,23 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/terminal/session", post(session))
         .route("/api/terminal/{id}/ws", get(terminal_upgrade))
         .route("/api/terminal/{id}/close", post(terminal_close))
+        .route("/api/chat", get(chat::status))
+        .route("/api/chat/send", post(chat::send))
+        .route("/api/chat/archive", post(chat::archive))
+        .route("/api/chat/delete", post(chat::delete))
+        .route("/api/chat/ws", get(chat::upgrade))
+        .route("/api/chat/{id}", get(chat::read))
+        .route("/api/chat/{id}/stop", post(chat::stop))
+        .route("/api/chat/{id}/attachments/{name}", get(chat::attachment))
+        .route("/api/chat/{id}/response", get(chat::response))
+        .route("/api/chat/{id}/speech", post(chat::speech))
+        .route("/api/voice", get(voice::status))
+        .route("/api/herdr/panes/{id}/response", get(voice::response))
+        .route("/api/herdr/panes/{id}/speech", post(voice::audio))
+        .route("/api/herdr/panes/{id}/voice-input", post(voice::send))
         .route("/api/herdr/snapshot", get(snapshot))
         .route("/api/herdr/workspaces", post(new_workspace))
+        .route("/api/herdr/workspaces/{id}/tabs", post(new_tab))
         .route("/api/herdr/panes/{id}", get(pane))
         .route("/api/herdr/panes/{id}/input", post(pane_input))
         .route("/api/herdr/ws", get(herdr_upgrade))
@@ -536,6 +648,14 @@ mod tests {
             true,
             None
         ));
+    }
+    #[test]
+    fn new_tabs_accept_only_herdr_workspace_ids() {
+        assert_eq!(workspace_id("w9F").unwrap(), "w9F");
+        assert_eq!(workspace_id("w_1-a:b").unwrap(), "w_1-a:b");
+        for id in ["", "../w", "w 1", "w/1", &"w".repeat(65)] {
+            assert_eq!(workspace_id(id).unwrap_err().0, StatusCode::BAD_REQUEST);
+        }
     }
     #[test]
     fn new_workspaces_start_in_folders_inside_home() {

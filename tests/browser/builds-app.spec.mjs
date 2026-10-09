@@ -155,3 +155,36 @@ test('Android shows only APK builds and explains installation permission', async
     { build: 'b'.repeat(64) },
   ]);
 });
+
+test('visionOS lists headset builds without an iOS installer', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__OMARCHY_PLATFORM__ = 'visionos';
+    window.webkit = {
+      messageHandlers: { shellInstallBuild: { postMessage: async () => ({ opened: true }) } },
+    };
+  });
+  await page.route('**/builds/catalog.json', route =>
+    route.fulfill({
+      json: [
+        { id: 'a'.repeat(64), build: '40', version: '1', platform: 'ios', notes: 'iPad update' },
+        {
+          id: 'b'.repeat(64),
+          build: '41',
+          version: '1',
+          platform: 'visionos',
+          notes: 'Headset update',
+        },
+      ],
+    })
+  );
+  await page.goto('/');
+  await page.keyboard.press('Meta+k');
+  await page.getByRole('searchbox', { name: 'Search apps, panes and files' }).fill('Builds');
+  await page.getByRole('button', { name: /Builds.*build dashboard/ }).click();
+  const app = page.locator('#remote-builds-app');
+  await expect(app.getByText('iPad update')).toHaveCount(0);
+  await expect(app.getByText('Headset update')).toBeVisible();
+  await expect(app.getByText('Latest build · visionOS')).toBeVisible();
+  await expect(app.getByRole('button', { name: 'Install build 41' })).toHaveCount(0);
+  await expect(app.getByText(/using your paired Mac/)).toBeVisible();
+});

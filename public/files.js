@@ -68,12 +68,15 @@
     trash: '\uf1f8',
   };
   class FilesApp {
-    /* `pick` turns the browser into a folder chooser: { title, label, choose(path), cancel() }. */
-    constructor(root, openTerminal, windowKey = 'files', { pick } = {}) {
+    /* `pick` turns the browser into a folder chooser: { title, label, choose(path), cancel() }.
+       `path` opens a specific folder instead of the last one this window visited. */
+    constructor(root, openTerminal, windowKey = 'files', { pick, path } = {}) {
       this.root = root;
       this.pick = pick;
       this.pathKey = 'omarchy-' + windowKey + '-path';
       this.openTerminal = openTerminal;
+      // Places Back left, for Forward to return to.
+      this.forward = [];
       this.path = '';
       this.hidden = false;
       this.abort = new AbortController();
@@ -90,6 +93,7 @@
       try {
         this.path = localStorage.getItem(this.pathKey) || '';
       } catch {}
+      if (path) this.path = path;
       root.classList.add('files-app');
       root.classList.toggle('files-picking', !!pick);
       this.heading = node('div', 'files-heading');
@@ -200,6 +204,19 @@
       root.addEventListener('touchcancel', () => {
         controlTouch = null;
       });
+      // Presses stay inside Files, except a swipe from the screen's side edges, which belongs to the
+      // shell (workspaces, or Back and Forward), using the shell's edge band. Such a swipe often
+      // starts just outside Files, so where each press began is noted for the whole document.
+      const edge = e => {
+        const band = Math.max(24, innerWidth * 0.08);
+        return e.clientX < band || e.clientX > innerWidth - band;
+      };
+      const edgePresses = new Set();
+      document.addEventListener(
+        'pointerdown',
+        e => (edge(e) ? edgePresses.add(e.pointerId) : edgePresses.delete(e.pointerId)),
+        { capture: true, signal: this.abort.signal }
+      );
       for (const type of [
         'pointerdown',
         'pointerup',
@@ -208,7 +225,13 @@
         'touchend',
         'click',
       ])
-        root.addEventListener(type, e => e.stopPropagation());
+        root.addEventListener(type, e => {
+          if (type.startsWith('pointer') && edgePresses.has(e.pointerId)) {
+            if (type === 'pointerup') edgePresses.delete(e.pointerId);
+            return;
+          }
+          e.stopPropagation();
+        });
       this.browse(this.path, true);
     }
     button(label, fn, aria, cls = 'remote-button') {
@@ -280,6 +303,7 @@
       this.text = null;
     }
     async browse(path, keepMode = false) {
+      if (!this.stepping) this.forward = [];
       if (!keepMode && !this.pick) {
         this.mode = 'browse';
         store('omarchy-files-mode', this.mode);
@@ -758,6 +782,7 @@
         this.body.append(node('p', 'remote-empty', 'Open a file or folder to add it here.'));
     }
     async preview(entry, line = 0) {
+      if (!this.stepping) this.forward = [];
       const seq = ++this.sequence;
       clearTimeout(this.debounce);
       this.clearPreview();
@@ -1004,11 +1029,33 @@
         this.selected.clear();
         this.drawChrome();
         this.drawList();
-      } else if (this.previewing) this.back();
-      else if (this.query) this.clearSearch();
-      else if (this.parent && this.path !== this.homePath) this.browse(this.parent);
-      else return false;
+      } else if (this.previewing) {
+        const entry = this.entryData;
+        this.step(() => this.back());
+        this.forward.push({ entry });
+      } else if (this.query) this.clearSearch();
+      else if (this.parent && this.path !== this.homePath) {
+        const path = this.path;
+        this.step(() => this.browse(this.parent));
+        this.forward.push({ path });
+      } else return false;
       return true;
+    }
+    /* Forward retraces Back: the folder it left or the file it closed. */
+    navigateForward() {
+      const next = this.forward.pop();
+      if (!next || this.dialog || this.selecting) return false;
+      this.step(() => (next.entry ? this.preview(next.entry) : this.browse(next.path)));
+      return true;
+    }
+    // Back and Forward keep the forward list; going anywhere new clears it, as a browser does.
+    step(go) {
+      this.stepping = true;
+      try {
+        go();
+      } finally {
+        this.stepping = false;
+      }
     }
     back() {
       if (this.editing && this.editor.value !== this.text) {
@@ -1345,6 +1392,16 @@
   window.HostFilesApp = FilesApp;
   window.HyprlandApps?.provide('files', {
     multiple: true,
+    // Both a fresh Files window and an existing one start at the requested folder.
+    // Saved path also carries this handoff into a standalone app window.
+    openAt(bridge, path) {
+      try {
+        localStorage.setItem('omarchy-files-path', path);
+      } catch {}
+      store('omarchy-files-mode', 'browse');
+      bridge.app('files')?.browse(path);
+      bridge.logic.openApp('files');
+    },
     create: (root, bridge, spec) =>
       new FilesApp(root, path => bridge.openTerminalAt(path), spec?.key),
   });

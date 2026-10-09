@@ -26,6 +26,7 @@
 <script src="/assets/xterm/addon-fit.js"></script>
 <script src="/native-terminal.js"></script>
 <script src="/native-input.js"></script>
+<script src="/dictation.js"></script>
 <script src="/files.js"></script>
 <script src="/browser.js"></script>
 <script src="/webapps.js"></script>
@@ -34,6 +35,10 @@
 <script src="/builds.js"></script>
 <link rel="stylesheet" href="/builds.css">
 <link rel="stylesheet" href="/codexbar.css">
+<script src="/assets/markdown/marked.js"></script>
+<script src="/assets/markdown/purify.js"></script>
+<script src="/chat.js"></script>
+<link rel="stylesheet" href="/chat.css">
 <script src="/remote.js"></script>
 <script src="/herdr.js"></script>
 <link rel="stylesheet" href="/herdr-widget.css">
@@ -572,11 +577,17 @@ class Component extends DCLogic {
     if (s.ov && dy > T && Math.abs(dx) < T) return this.set({ ov: false });
     // On Android the left edge is Back (as Android's own Back gesture is here), stepping back inside
     // the app before going Home; elsewhere it is the previous workspace.
-    if (p.x < E && dx > T)
+    // With edge navigation on (Settings), the edges are Back and Forward everywhere.
+    if (p.x < E && dx > T) {
+      if (window.HyprlandDesk?.edgeSwipe('left')) return;
       return window.__OMARCHY_PLATFORM__ === 'android'
         ? window.HyprlandDesk?.nativeBack()
         : this.go(s.ws - 1);
-    if (p.x > p.w - E && dx < -T) return this.go(s.ws + 1);
+    }
+    if (p.x > p.w - E && dx < -T) {
+      if (window.HyprlandDesk?.edgeSwipe('right')) return;
+      return this.go(s.ws + 1);
+    }
   };
   // Card geometry for every catalog app (public/cards.js paints it); the desk replaces it above 600 px.
   layout() {

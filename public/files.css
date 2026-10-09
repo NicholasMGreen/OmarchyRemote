@@ -400,9 +400,13 @@ mark {
   overflow: auto;
   overscroll-behavior: contain;
   touch-action: pan-x pan-y;
+  /* The editor's size. iOS enlarges text in very wide blocks, such as Markdown paragraphs on
+     one line; text-size-adjust keeps the preview at the size set here. */
   font:
-    11px/1.9 'JetBrains Mono',
+    12px/1.7 'JetBrains Mono',
     monospace;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 .files-text pre {
   margin: 0;

@@ -1596,12 +1596,19 @@
     activeDesk.keydown(event);
     return event.defaultPrevented;
   };
+  // With this device setting, edge swipes go Back and Forward instead of between workspaces.
+  const edgeNavigation = () => HyprlandUtil.storage.get('omarchy-edge-navigation') === 'true';
   window.HyprlandDesk = {
     attach: logic => (activeDesk = new Desk(logic)),
     nativeKey,
-    // Android's right-edge swipe: the next workspace, as the phone shell's own edge swipe does.
+    // Android's right-edge swipe: the next workspace, as the phone shell's own edge swipe does,
+    // or Forward with edge navigation on.
     nativeNext: () => {
       if (!activeDesk) return false;
+      if (edgeNavigation()) {
+        window.HyprlandDesk.nativeForward();
+        return true;
+      }
       const { logic } = activeDesk;
       logic.go(logic.state.ws + 1);
       return true;
@@ -1623,6 +1630,23 @@
       // Nothing left to go back to in the app: return to Home; Back on Home leaves the shell.
       else if (logic.state.ws !== 0) logic.go(0);
       else return false;
+      return true;
+    },
+    // Forward retraces a Back inside the current app (a thread, a folder, page history), through
+    // navigateForward(). The shell's own sheets and overview have nothing to go forward to.
+    nativeForward: () => {
+      if (!activeDesk) return false;
+      const { logic } = activeDesk;
+      const s = logic.state;
+      if (activeDesk.sheet || s.launch || s.ov || s.map) return false;
+      return !!logic.remote?.app(logic.cur())?.navigateForward?.();
+    },
+    // The phone shell's edge swipes: true when the setting makes them Back and Forward, so the
+    // shell leaves workspaces alone even when there is nothing to go back or forward to.
+    edgeSwipe: side => {
+      if (!edgeNavigation()) return false;
+      if (side === 'left') window.HyprlandDesk.nativeBack();
+      else window.HyprlandDesk.nativeForward();
       return true;
     },
     actionKeys,

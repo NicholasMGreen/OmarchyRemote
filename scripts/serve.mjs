@@ -47,7 +47,10 @@ function proxyApi(req, res) {
       res.writeHead(502, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
     res.end(JSON.stringify({ error: 'Host backend unavailable' }));
   });
-  upstream.setTimeout(10000, () => upstream.destroy());
+  const speechRequest =
+    req.method === 'POST' &&
+    (req.url === '/api/dictation' || /^\/api\/herdr\/panes\/[^/]+\/speech$/.test(req.url));
+  upstream.setTimeout(speechRequest ? 240000 : 10000, () => upstream.destroy());
   res.on('close', () => upstream.destroy());
   req.pipe(upstream);
 }

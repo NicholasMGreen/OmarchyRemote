@@ -1,7 +1,7 @@
 /* Herdr owns its app provider and Home widget, including thread navigation. */
 (() => {
   const { node, button } = HyprlandUtil;
-  const { orderHerdr, paneGroup, HerdrApp } = HyprlandRemote;
+  const { orderHerdr, paneGroup, paneState, HerdrApp } = HyprlandRemote;
   function render(root, snapshot, { open, error } = {}) {
     const scroll = root.querySelector('.herdr-widget-threads')?.scrollTop || 0;
     root.replaceChildren();
@@ -54,7 +54,9 @@
           ? pane.attention_kind && pane.attention_kind !== 'none'
             ? pane.attention_kind.replaceAll('_', ' ')
             : pane.agent_status || 'Needs attention'
-          : 'Working'
+          : paneState(pane) === 'waiting'
+            ? 'Waiting'
+            : 'Working'
       );
       row.append(info, state);
       list.append(row);

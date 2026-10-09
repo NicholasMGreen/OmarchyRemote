@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish an already signed/validated iOS IPA or Android APK to the private build download page."""
+"""Publish an already signed/validated iOS/visionOS IPA or Android APK to the private build download page."""
 import argparse
 import datetime
 import fcntl
@@ -67,8 +67,8 @@ def publish(ipa, destination, base_url, notes, commit):
             if len(roots) != 1:
                 raise ValueError('Expected exactly one main iOS app')
             info = plistlib.loads(archive.read(roots[0]))
-            if info.get('DTPlatformName') != 'iphoneos':
-                raise ValueError('Expected a physical iOS build')
+            if info.get('DTPlatformName') not in ('iphoneos', 'xros'):
+                raise ValueError('Expected a physical iOS or visionOS build')
             profile_data = archive.read(roots[0].replace('Info.plist', 'embedded.mobileprovision'))
         decoded = subprocess.run(
             ['openssl', 'cms', '-verify', '-inform', 'DER', '-noverify'],
@@ -84,9 +84,9 @@ def publish(ipa, destination, base_url, notes, commit):
     entry = dict(id=key, build=build, version=version, sha256=digest,
                  bytes=ipa.stat().st_size, notes=notes, commit=commit,
                  published=datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                 platform='android' if android else 'ios', identifier=identifier,
+                 platform='android' if android else 'visionos' if info.get('DTPlatformName') == 'xros' else 'ios', identifier=identifier,
                  expires=expires.date().isoformat() if expires else None,
-                 devices=[name for number, name in [(1, 'iPhone'), (2, 'iPad')]
+                 devices=[name for number, name in [(1, 'iPhone'), (2, 'iPad'), (7, 'Vision Pro')]
                           if number in info.get('UIDeviceFamily', [])])
     filename = 'app.apk' if android else 'app.ipa'
     if android:
@@ -115,7 +115,7 @@ def publish(ipa, destination, base_url, notes, commit):
                                             'bundle-version': build,
                                             'kind': 'software',
                                             'title': info.get('CFBundleDisplayName', 'Omarchy Remote')}}]}
-        if not android:
+        if entry['platform'] == 'ios':
             atomic_write(folder / 'manifest.plist', plistlib.dumps(manifest))
         catalog = [entry] + [item for item in catalog if item['id'] != key]
         cards = []
@@ -127,7 +127,7 @@ def publish(ipa, destination, base_url, notes, commit):
             extension = 'apk' if is_android else 'ipa'
             if is_android:
                 install = f"{item['id']}/app.apk"
-            install_link = '' if is_android else f'<a class="install" href="{esc(install)}">Install on device <span aria-hidden="true">↗</span></a>'
+            install_link = '' if item.get('platform') in ('android', 'visionos') else f'<a class="install" href="{esc(install)}">Install on device <span aria-hidden="true">↗</span></a>'
             expiry_label = 'Minimum Android API' if is_android else 'Profile expires'
             expiry = str(item.get('min_sdk', '')) if is_android else item['expires']
             cards.append(f'''<article class="build">

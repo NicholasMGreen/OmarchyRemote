@@ -17,6 +17,7 @@
     'omarchy-layout-desk',
     'omarchy-focus-follows-pointer',
     'omarchy-text-scale',
+    'omarchy-edge-navigation',
   ];
   // The text-scale engine lives in public/text-scale.js; this module keeps the
   // backup key and the Settings UI.
@@ -423,6 +424,12 @@
     sizeInput.value = window.HyprlandTextScale?.current() || '100';
     sizeInput.onchange = () => window.HyprlandTextScale?.set(sizeInput.value);
     sizeRow.append(node('span', '', 'Text size'), sizeInput);
+    const edgeRow = node('label', 'device-focus-option');
+    const edgeInput = node('input');
+    edgeInput.type = 'checkbox';
+    edgeInput.checked = storage.get('omarchy-edge-navigation') === 'true';
+    edgeInput.onchange = () => storage.set('omarchy-edge-navigation', String(edgeInput.checked));
+    edgeRow.append(edgeInput, node('span', '', 'Edge swipes go back and forward'));
     const layoutRow = node('label', 'device-focus-option');
     const layoutInput = node('select');
     layoutInput.setAttribute('aria-label', 'Window layout');
@@ -459,6 +466,12 @@
         'p',
         'theme-note',
         'Shrinks or grows text between 70% and 125%, including Terminal and host apps. Windows keep their layout. Saved for this device.'
+      ),
+      edgeRow,
+      node(
+        'p',
+        'theme-note',
+        'Swipe in from the left edge to go back (a thread, a folder, a page) and from the right edge to go forward, instead of switching workspaces. Use the workspace pills or Expo to switch. Saved for this device.'
       ),
       problem,
       actions,

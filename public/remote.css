@@ -63,6 +63,7 @@
 }
 .herdr-input-bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   padding-top: 8px;
@@ -481,9 +482,10 @@
   flex: none;
   margin-bottom: 12px;
 }
-.herdr-search-field .herdr-new {
-  flex: none;
-  margin-right: -6px;
+.herdr-search-field .herdr-toolbar-key {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
 }
 /* The folder chooser covers the whole Herdr tile; Files' window offsets do not apply. */
 #remote-herdr-app > .herdr-folder-picker {
@@ -570,6 +572,16 @@
 .herdr-state[data-state='working'] {
   color: var(--theme-accent);
 }
+.herdr-state[data-state='waiting'] {
+  color: var(--theme-cyan);
+}
+.herdr-background {
+  font-size: 10px;
+  color: var(--theme-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .herdr-state[data-state='blocked'] {
   color: var(--theme-yellow);
 }
@@ -586,6 +598,28 @@
 }
 .herdr-detail-bar > button {
   flex: none;
+}
+.herdr-toolbar-key {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  color: var(--theme-secondary);
+}
+.herdr-toolbar-key svg {
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+.herdr-group-new {
+  border: 0;
+  background: none;
+  color: var(--theme-accent);
+  font: inherit;
+  font-size: 13px;
+  line-height: 13px;
+  padding: 0 0 0 8px;
+  cursor: pointer;
 }
 .herdr-back {
   width: 36px;
@@ -658,7 +692,7 @@
 /* A full-width tile keeps the pane list as a sidebar beside the selected pane. */
 #remote-herdr-app.herdr-split {
   display: grid;
-  grid-template-columns: 300px minmax(0, 1fr);
+  grid-template-columns: var(--herdr-sidebar-width, 300px) minmax(0, 1fr);
   grid-template-rows: auto auto minmax(0, 1fr) auto;
   column-gap: 14px;
 }
@@ -783,4 +817,187 @@
 .herdr-composer .native-mode,
 .herdr-composer .native-dismiss {
   border-radius: 10px;
+}
+
+.dictation-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 4px 0;
+}
+.dictation-notice[hidden] {
+  display: none;
+}
+.dictation-button[aria-pressed='true'] {
+  color: var(--theme-red);
+  border-color: currentColor;
+}
+
+.herdr-sidebar-divider {
+  grid-area: 2 / 1 / 5 / 2;
+  justify-self: end;
+  width: 14px;
+  margin-right: -14px;
+  z-index: 2;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+  border-radius: 6px;
+}
+.herdr-sidebar-divider:hover,
+.herdr-sidebar-divider:focus-visible {
+  background: color-mix(in srgb, var(--theme-accent) 20%, transparent);
+}
+.herdr-sidebar-divider[hidden],
+.herdr-toolbar-key[hidden] {
+  display: none;
+}
+#remote-herdr-app.herdr-split.herdr-sidebar-hidden {
+  grid-template-columns: 0 minmax(0, 1fr);
+  column-gap: 0;
+}
+.herdr-split.herdr-sidebar-hidden > .herdr-search-field,
+.herdr-split.herdr-sidebar-hidden > .herdr-list {
+  display: none;
+}
+.herdr-split.herdr-sidebar-narrow > .herdr-search-field {
+  display: grid;
+  grid-template-columns: repeat(4, 32px);
+  height: auto;
+  padding: 6px 12px;
+  gap: 6px;
+}
+.herdr-split.herdr-sidebar-narrow > .herdr-search-field .prompt-prefix {
+  display: none;
+}
+.herdr-split.herdr-sidebar-narrow > .herdr-search-field input {
+  grid-column: 1 / -1;
+  width: 100%;
+  height: 26px;
+}
+.herdr-split.herdr-sidebar-narrow.herdr-sidebar-hidden > .herdr-search-field {
+  display: none;
+}
+
+/* Voice controls never reserve a row above the composer. */
+.dictation-notice,
+.herdr-voice-status {
+  position: absolute;
+  z-index: 5;
+  right: 10px;
+  bottom: 52px;
+  max-width: min(320px, calc(100% - 20px));
+  padding: 12px;
+  border: 1px solid var(--theme-border);
+  border-radius: 12px;
+  background: var(--theme-surface-raised);
+  color: var(--theme-foreground);
+  box-shadow: 0 4px 16px #0004;
+}
+.herdr-voice-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.herdr-voice-status[hidden] {
+  display: none;
+}
+.dictation-button,
+.herdr-voice-microphone {
+  -webkit-touch-callout: none;
+  user-select: none;
+}
+.dictation-button[data-mode='voice'] {
+  color: var(--theme-accent);
+  border-color: currentColor;
+}
+.dictation-button[data-state='recording'] svg {
+  background: currentColor;
+  border-radius: 3px;
+}
+.dictation-button[aria-busy='true'] {
+  border-style: dashed;
+}
+
+/* A sibling of the scrolling output keeps the voice target stationary while reading. */
+.herdr-output-stage {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.herdr-voice-microphone {
+  position: absolute;
+  z-index: 3;
+  top: clamp(12px, calc(100% - 92px), 120px);
+  right: 16px;
+  width: 80px;
+  height: 80px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 8px;
+  border-radius: 50%;
+  border: 2px solid var(--theme-accent);
+  background: var(--theme-surface-raised);
+  color: var(--theme-foreground);
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--theme-background) 70%, transparent);
+  font: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+.herdr-voice-microphone-icon {
+  display: flex;
+}
+.herdr-voice-microphone-icon svg {
+  width: 30px;
+  height: 30px;
+}
+.herdr-voice-microphone-caption {
+  font-size: 12px;
+  font-weight: 600;
+}
+.herdr-voice-microphone[data-state='recording'] {
+  border-color: var(--theme-red);
+  background: color-mix(in srgb, var(--theme-red) 18%, var(--theme-surface-raised));
+}
+.herdr-voice-microphone[data-state='recording'] .herdr-voice-microphone-icon {
+  width: 24px;
+  height: 24px;
+  margin: 3px;
+  border-radius: 5px;
+  background: var(--theme-red);
+}
+.herdr-voice-microphone[data-state='recording'] svg {
+  display: none;
+}
+.herdr-voice-microphone:disabled {
+  cursor: wait;
+  border-style: dashed;
+}
+.herdr-voice-microphone:active:not(:disabled) {
+  background: color-mix(in srgb, var(--theme-accent) 25%, var(--theme-surface-raised));
+}
+.herdr-voice-speaker {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2px solid var(--theme-surface-raised);
+  background: var(--theme-accent);
+  color: var(--theme-background);
+}
+.herdr-voice-microphone:focus-visible {
+  outline: 3px solid var(--theme-foreground);
+  outline-offset: 3px;
 }

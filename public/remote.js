@@ -30,6 +30,98 @@
     if (!response.ok) throw Error(value.error || 'Host unavailable');
     return value;
   };
+  // Herdr reports neither a pane's cursor nor its screen mode, so a cursor is drawn only at a shell
+  // prompt, where it sits at the end of the typed text: after the last text written, or where a dim
+  // or grey autosuggestion (fish, zsh-autosuggestions) starts. Full-screen programs such as Vim, and
+  // agents, get no cursor rather than a misplaced one.
+  const SHELLS = new Set([
+    'fish',
+    'bash',
+    'zsh',
+    'sh',
+    'dash',
+    'ksh',
+    'tcsh',
+    'csh',
+    'nu',
+    'elvish',
+    'xonsh',
+    'pwsh',
+  ]);
+  const PRESS_EVENTS = [
+    'pointerdown',
+    'pointerup',
+    'pointercancel',
+    'touchstart',
+    'touchend',
+    'touchcancel',
+  ];
+  const editable = element =>
+    !!element && (element.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(element.tagName));
+  function bufferLines(term) {
+    const buffer = term.buffer.active;
+    return Array.from({ length: buffer.length }, (_, i) =>
+      buffer.getLine(i)?.translateToString(true)
+    );
+  }
+  // Align snapshots using surrounding content, not just a prefix of the visible row.
+  // Agents repeat tool output and redraw live summaries; the older copy must not win
+  // merely because it still contains one line that has changed in the current reply.
+  function historyPosition(before, after, source) {
+    const positions = lines => {
+      const map = new Map();
+      lines.forEach((line, i) => {
+        if (!/[\p{L}\p{N}]/u.test(line || '')) return;
+        if (!map.has(line)) map.set(line, []);
+        map.get(line).push(i);
+      });
+      return map;
+    };
+    const oldPositions = positions(before),
+      newPositions = positions(after),
+      scores = new Map(),
+      expected = after.length - before.length;
+    for (const [line, oldRows] of oldPositions) {
+      const newRows = newPositions.get(line);
+      // Frequently repeated status rows provide little evidence and can make the
+      // comparison quadratic. Blank rows and rules were already excluded above.
+      if (!newRows || oldRows.length > 16 || newRows.length > 16) continue;
+      for (const oldRow of oldRows) {
+        const weight = 1 / ((1 + Math.abs(oldRow - source) / 24) * oldRows.length * newRows.length);
+        for (const newRow of newRows) {
+          const offset = newRow - oldRow;
+          scores.set(offset, (scores.get(offset) || 0) + weight);
+        }
+      }
+    }
+    let offset = expected,
+      best = 0;
+    for (const [candidate, score] of scores)
+      if (
+        score > best ||
+        (score === best && Math.abs(candidate - expected) < Math.abs(offset - expected))
+      ) {
+        offset = candidate;
+        best = score;
+      }
+    return Math.max(0, Math.min(after.length - 1, source + offset));
+  }
+  function suggestionColumn(term) {
+    const b = term.buffer.active;
+    const line = b.getLine(b.baseY + b.cursorY);
+    if (!line) return null;
+    const cell = b.getNullCell();
+    let x = b.cursorX,
+      suggested = false;
+    while (x > 0) {
+      line.getCell(x - 1, cell);
+      const color = cell.isFgPalette() ? cell.getFgColor() : -1;
+      if (!cell.isDim() && color !== 8 && !(color >= 238 && color <= 246)) break;
+      if (cell.getChars().trim()) suggested = true;
+      x--;
+    }
+    return suggested ? x : null;
+  }
   const socket = path =>
     new WebSocket(
       `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/api/${path}`
@@ -112,13 +204,21 @@
     const text = shift ? symbols[key] || key.toUpperCase() : key;
     return { data: text, text, keys: [] };
   }
+  // An idle or finished agent that still has background commands or agents running is waiting,
+  // not done; the host lists them in `background`.
+  function paneState(p) {
+    const s = String(p.agent_status || '');
+    return p.background?.length && !/working|running|progress|busy|blocked/i.test(s)
+      ? 'waiting'
+      : s;
+  }
   // Match Herdr Mobile's attention/working/done/ready groups. Activity sequences
   // come from agent.list; per-pane revision numbers must never rank different panes.
   function orderHerdr(snapshot) {
     const rank = p => {
-      const s = String(p.agent_status || '').toLowerCase();
+      const s = paneState(p).toLowerCase();
       if (s.includes('blocked')) return p.attention_kind === 'chat' ? 3 : 0;
-      if (/working|running|progress|busy/.test(s)) return 1;
+      if (/working|running|progress|busy|waiting/.test(s)) return 1;
       if (/done|complete|finish|success|unread/.test(s)) return 2;
       if (s === 'idle' || s === 'ready') return 3;
       return 4;
@@ -714,11 +814,23 @@
   const paneGroup = p =>
     /blocked/.test(p.agent_status) && p.attention_kind !== 'chat'
       ? 'attention'
-      : /working|running|progress|busy/.test(p.agent_status)
+      : /working|running|progress|busy|waiting/.test(paneState(p))
         ? 'running'
         : /idle|ready|blocked/.test(p.agent_status)
           ? 'idle'
           : 'done';
+  // "⏳ Run the tests +1" for the background work a pane waits on.
+  function backgroundLine(p) {
+    const tasks = p.background || [];
+    if (!tasks.length) return null;
+    const line = node(
+      'span',
+      'herdr-background',
+      '⏳ ' + tasks[0].description + (tasks.length > 1 ? ` +${tasks.length - 1}` : '')
+    );
+    line.title = tasks.map(task => task.description).join('\n');
+    return line;
+  }
   class HerdrApp {
     constructor(root, bridge) {
       this.root = root;
@@ -740,7 +852,11 @@
       const bar = node('div', 'remote-bar');
       bar.classList.add('herdr-connection');
       bar.append(this.status);
-      // Search sits in a prompt field: the ❯ prefix at the left, a `/` hint at the right.
+      // Header controls share one icon size, stroke and keycap treatment.
+      const toolbarIcon = path =>
+        `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${path}"/></svg>`;
+      const plusIcon = toolbarIcon('M12 5v14M5 12h14');
+      // Search sits in a prompt field; the slash key focuses it.
       this.searchField = node('div', 'prompt-field herdr-search-field');
       this.search = node('input', 'herdr-search');
       this.search.type = 'search';
@@ -749,10 +865,13 @@
         this.listSignature = null;
         this.renderList();
       };
-      const searchKey = node('span', 'kbd', '/');
-      searchKey.setAttribute('aria-hidden', 'true');
+      const searchKey = button('', () => this.search.focus(), 'keycap herdr-toolbar-key');
+      searchKey.innerHTML = toolbarIcon('M15 5 9 19');
+      searchKey.setAttribute('aria-label', 'Focus pane search');
+      searchKey.title = 'Search panes · /';
       this.newButton = button('+', () => this.chooseFolder());
-      this.newButton.classList.add('herdr-new', 'keycap', 'small');
+      this.newButton.classList.add('herdr-new', 'keycap', 'herdr-toolbar-key');
+      this.newButton.innerHTML = plusIcon;
       this.newButton.setAttribute('aria-label', 'New pane in a folder');
       this.newButton.title = 'New pane in a folder';
       this.searchField.append(
@@ -798,14 +917,101 @@
       this.paneTabs = node('div', 'herdr-pane-tabs');
       this.detailCenter = node('div', 'herdr-detail-center');
       this.detailCenter.append(this.title, this.paneTabs);
-      this.detailBar.append(this.backButton, this.detailCenter, this.filePicker);
+      this.newTabButton = button('+', () =>
+        this.newTab(this.snapshot?.panes.find(p => p.pane_id === this.selected))
+      );
+      this.newTabButton.classList.add('herdr-new-tab', 'keycap', 'herdr-toolbar-key');
+      this.newTabButton.innerHTML = plusIcon;
+      this.newTabButton.setAttribute('aria-label', 'New tab in this workspace');
+      this.newTabButton.title = 'New tab in this workspace';
+      this.browseButton = button('', () => {
+        const pane = this.snapshot?.panes.find(p => p.pane_id === this.selected);
+        const path = pane?.foreground_cwd || pane?.cwd;
+        if (path) HyprlandApps.get('files')?.provider?.openAt(this.bridge, path);
+      });
+      this.browseButton.classList.add('herdr-browse', 'keycap', 'herdr-toolbar-key');
+      this.browseButton.setAttribute('aria-label', 'Open pane folder in Files');
+      this.browseButton.title = 'Open pane folder in Files';
+      this.browseButton.innerHTML = toolbarIcon(
+        'M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1Z'
+      );
+      this.sidebarWidth = Number(storage.get('omarchy-herdr-sidebar-width')) || 300;
+      this.sidebarHidden = storage.get('omarchy-herdr-sidebar-hidden') === 'true';
+      this.sidebarToggle = button(
+        '',
+        () => {
+          this.sidebarHidden = !this.sidebarHidden;
+          storage.set('omarchy-herdr-sidebar-hidden', String(this.sidebarHidden));
+          this.syncPanels();
+        },
+        'keycap herdr-toolbar-key'
+      );
+      this.sidebarToggle.innerHTML = toolbarIcon('M4 4h16v16H4zM9 4v16');
+      this.sidebarDivider = node('div', 'herdr-sidebar-divider');
+      this.sidebarDivider.setAttribute('role', 'separator');
+      this.sidebarDivider.setAttribute('aria-label', 'Resize Herdr sidebar');
+      this.sidebarDivider.setAttribute('aria-orientation', 'vertical');
+      this.sidebarDivider.tabIndex = 0;
+      this.sidebarDivider.hidden = true;
+      this.sidebarToggle.hidden = true;
+      for (const type of ['touchstart', 'touchmove', 'touchend', 'click'])
+        this.sidebarDivider.addEventListener(type, e => e.stopPropagation(), { passive: true });
+      this.sidebarDivider.onpointerdown = e => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        this.sidebarDrag = { id: e.pointerId, x: e.clientX, width: this.effectiveSidebarWidth };
+        this.sidebarDivider.setPointerCapture(e.pointerId);
+      };
+      this.sidebarDivider.onpointermove = e => {
+        if (this.sidebarDrag?.id !== e.pointerId) return;
+        e.preventDefault();
+        e.stopPropagation();
+        this.setSidebarWidth(this.sidebarDrag.width + e.clientX - this.sidebarDrag.x);
+      };
+      const finishSidebarDrag = e => {
+        if (this.sidebarDrag?.id !== e.pointerId) return;
+        e.stopPropagation();
+        if (e.type === 'pointercancel') this.setSidebarWidth(this.sidebarDrag.width);
+        this.sidebarDrag = null;
+        storage.set('omarchy-herdr-sidebar-width', String(this.sidebarWidth));
+      };
+      this.sidebarDivider.onpointerup = finishSidebarDrag;
+      this.sidebarDivider.onpointercancel = finishSidebarDrag;
+      this.sidebarDivider.onlostpointercapture = finishSidebarDrag;
+      this.sidebarDivider.ondblclick = () => this.setSidebarWidth(300, true);
+      this.sidebarDivider.onkeydown = e => {
+        const widths = {
+          ArrowLeft: this.effectiveSidebarWidth - 16,
+          ArrowRight: this.effectiveSidebarWidth + 16,
+          Home: 180,
+          End: this.sidebarMax(),
+        };
+        if (!(e.key in widths)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        this.setSidebarWidth(widths[e.key], true);
+      };
+      root.append(this.sidebarDivider);
+      this.detailBar.append(
+        this.backButton,
+        this.detailCenter,
+        this.browseButton,
+        this.newTabButton,
+        this.filePicker
+      );
+      this.outputStage = node('div', 'herdr-output-stage');
       this.output = node('div', 'herdr-output');
+      this.outputStage.append(this.output);
       this.canvas = node('div', 'herdr-canvas');
       // Fit and ↓ Latest float inside the output panel's bottom-right corner.
       this.outputTools = node('div', 'herdr-output-tools');
       this.fitButton.classList.add('keycap', 'small');
       this.outputTools.append(this.fitButton);
-      this.output.append(this.canvas, this.outputTools);
+      this.output.append(this.canvas);
+      this.outputStage.append(this.outputTools);
+      this.outputTools.onpointerdown = e => e.preventDefault();
+      this.outputTools.onclick = e => e.stopPropagation();
       this.followOutput = true;
       this.latest = button('↓ Latest', () => {
         this.showLatest();
@@ -830,7 +1036,7 @@
       this.promptField.setAttribute('aria-label', 'Type a message');
       this.promptField.append(node('span', 'prompt-prefix', '❯'), node('i', 'herdr-caret'));
       this.promptRow.append(this.attachButton, this.promptField);
-      this.detail.append(this.detailBar, this.metadata, this.output, inputBar, this.promptRow);
+      this.detail.append(this.detailBar, this.metadata, this.outputStage, inputBar, this.promptRow);
       this.term = terminal(this.canvas, true);
       this.fit = new FitAddon.FitAddon();
       this.term.loadAddon(this.fit);
@@ -857,10 +1063,19 @@
       this.nativeInput = bridge.createInput(
         root,
         true,
-        (text, enter) => this.input({ text, keys: enter ? ['Enter'] : [] }),
+        // Message mode sends a composed message, which Herdr pastes; Keys mode types each key.
+        (text, enter) =>
+          this.input({ text, keys: enter ? ['Enter'] : [], typed: !this.nativeInput.message }),
         { dismissOnSend: true, compactControls: true, draftStore: 'omarchy-herdr-drafts-v1' }
       );
       this.nativeInput.select(this.selected);
+      this.dictation = new HyprlandDictation(
+        this.nativeInput,
+        () => this.selected,
+        this.outputStage,
+        this.outputTools
+      );
+      this.promptRow.append(this.dictation.control);
       this.nativeInput.field.addEventListener('paste', e => {
         const files = [...(e.clipboardData?.items || [])]
           .filter(i => i.kind === 'file')
@@ -873,25 +1088,68 @@
       });
       this.resizeObserver = new ResizeObserver(() => {
         if (this.lastRead) this.renderOutput(this.lastRead, true);
+        this.sizePane();
       });
       this.resizeObserver.observe(this.output);
       this.splitObserver = new ResizeObserver(() => this.layout(root.clientWidth >= 700));
       this.splitObserver.observe(root);
     }
+    get actions() {
+      return this.selected ? this.dictation.actions : [];
+    }
     // Wide tiles show the whole pane list as a sidebar in place of the list page.
+    sidebarMax() {
+      return Math.max(180, Math.min(440, this.root.clientWidth * 0.45));
+    }
+    setSidebarWidth(width, save = false) {
+      this.sidebarWidth = Math.max(180, Math.min(this.sidebarMax(), width));
+      this.applySidebarWidth();
+      if (save) storage.set('omarchy-herdr-sidebar-width', String(this.sidebarWidth));
+    }
+    applySidebarWidth() {
+      this.effectiveSidebarWidth = Math.max(180, Math.min(this.sidebarMax(), this.sidebarWidth));
+      this.root.style.setProperty('--herdr-sidebar-width', `${this.effectiveSidebarWidth}px`);
+      this.root.classList.toggle('herdr-sidebar-narrow', this.effectiveSidebarWidth < 260);
+      this.sidebarDivider.setAttribute('aria-valuemin', '180');
+      this.sidebarDivider.setAttribute('aria-valuemax', String(Math.round(this.sidebarMax())));
+      this.sidebarDivider.setAttribute(
+        'aria-valuenow',
+        String(Math.round(this.effectiveSidebarWidth))
+      );
+    }
     layout(split) {
+      this.applySidebarWidth();
       if (split === this.split) return;
       this.split = split;
       this.root.classList.toggle('herdr-split', split);
       this.syncPanels();
+      // The sidebar's workspace headers carry new-tab buttons only in the split layout.
+      if (this.snapshot) this.renderList();
     }
     syncPanels() {
       const detail = !this.detail.hidden;
-      this.searchField.hidden = this.list.hidden = detail && !this.split;
+      const collapsed = this.split && this.sidebarHidden && detail;
+      this.root.classList.toggle('herdr-sidebar-hidden', collapsed);
+      this.searchField.hidden = this.list.hidden = detail && (!this.split || collapsed);
       this.placeholder.hidden = detail || !this.split;
-      // The sidebar already names the pane, so a split tile shows nothing above the output.
-      this.detailBar.hidden = this.backButton.hidden = this.split;
-      this.paneTabs.hidden = this.split || this.tabsRedundant;
+      this.browseButton.hidden = !detail;
+      this.sidebarToggle.hidden = !this.split || !detail;
+      this.sidebarToggle.setAttribute(
+        'aria-label',
+        collapsed ? 'Show Herdr sidebar' : 'Hide Herdr sidebar'
+      );
+      this.sidebarToggle.title = collapsed ? 'Show sidebar' : 'Hide sidebar';
+      this.sidebarToggle.setAttribute('aria-expanded', String(!collapsed));
+      this.sidebarDivider.hidden = !this.split || collapsed;
+      if (this.split && !collapsed) {
+        this.searchField.append(this.browseButton, this.sidebarToggle);
+      } else {
+        this.detailBar.insertBefore(this.browseButton, this.newTabButton);
+        this.detailBar.prepend(this.sidebarToggle);
+      }
+      this.detailBar.hidden = this.split && !collapsed;
+      this.backButton.hidden = this.split;
+      this.paneTabs.hidden = (this.split && !collapsed) || this.tabsRedundant;
       this.title.hidden = !this.paneTabs.hidden;
     }
     connect() {
@@ -901,7 +1159,14 @@
       this.ws = ws;
       this.setStatus('connecting…');
       ws.onopen = () => {
-        if (this.selected) this.send({ type: 'select', pane_id: this.selected });
+        // A new connection starts at the normal depth; ask again if reading history.
+        this.deepHistory = false;
+        if (this.selected) {
+          this.send({ type: 'select', pane_id: this.selected });
+          this.paneSize = null;
+          this.sizePane();
+        }
+        this.syncHistory();
       };
       ws.onmessage = event => {
         const m = JSON.parse(event.data);
@@ -964,6 +1229,7 @@
     renderList() {
       const signature = JSON.stringify([
         this.search.value,
+        this.split,
         this.snapshot.workspaces.map(w => [w.workspace_id, w.label]),
         this.snapshot.panes.map(p => [
           p.pane_id,
@@ -971,6 +1237,7 @@
           p.tab_id,
           p.agent,
           p.agent_status,
+          p.background?.map(task => task.description),
           p.state_change_seq,
           p.attention_kind,
           p.terminal_title_stripped,
@@ -1003,10 +1270,21 @@
         );
         if (!panes.length) continue;
         const group = node('section', 'herdr-group legend');
-        group.append(
-          node('span', 'legend-title', workspace.label || workspace.workspace_id),
-          node('span', 'legend-meta', `${panes.length} pane${panes.length === 1 ? '' : 's'}`)
+        const meta = node(
+          'span',
+          'legend-meta',
+          `${panes.length} pane${panes.length === 1 ? '' : 's'}`
         );
+        // A wide tile has no pane header, so each workspace offers its new-tab button here.
+        if (this.split) {
+          const add = button('+', () =>
+            this.newTab(panes.find(p => p.pane_id === this.selected) || panes[0])
+          );
+          add.className = 'herdr-group-new';
+          add.setAttribute('aria-label', `New tab in ${workspace.label || workspace.workspace_id}`);
+          meta.append(add);
+        }
+        group.append(node('span', 'legend-title', workspace.label || workspace.workspace_id), meta);
         for (const pane of panes) {
           const row = button('', () => this.select(pane.pane_id));
           row.className = 'herdr-pane';
@@ -1024,8 +1302,11 @@
             label,
             node('span', 'remote-status', HyprlandApps.tilde(pane.foreground_cwd || pane.cwd))
           );
-          const status = node('span', 'herdr-state', pane.agent_status || 'unknown');
-          status.dataset.state = pane.agent_status || 'unknown';
+          const waiting = backgroundLine(pane);
+          if (waiting) info.append(waiting);
+          const state = paneState(pane) || 'unknown';
+          const status = node('span', 'herdr-state', state);
+          status.dataset.state = state;
           row.append(icon, info, status);
           group.append(row);
         }
@@ -1051,9 +1332,11 @@
     showDetail(pane) {
       this.detail.hidden = false;
       this.title.textContent = this.paneLabel(pane);
+      this.browseButton.disabled = !(pane.foreground_cwd || pane.cwd);
       const signature = JSON.stringify([
         pane.pane_id,
         pane.agent_status,
+        pane.background?.length,
         pane.cwd,
         this.recentPanes,
         this.snapshot?.workspaces,
@@ -1068,7 +1351,12 @@
       ]);
       if (signature !== this.detailSignature) {
         this.detailSignature = signature;
-        this.metadata.textContent = `${pane.agent || 'shell'} · ${pane.agent_status || 'unknown'} · ${HyprlandApps.tilde(pane.foreground_cwd || pane.cwd)}`;
+        const count = pane.background?.length || 0;
+        const state =
+          paneState(pane) === 'waiting'
+            ? `waiting on ${count} background ${count === 1 ? 'task' : 'tasks'}`
+            : pane.agent_status || 'unknown';
+        this.metadata.textContent = `${pane.agent || 'shell'} · ${state} · ${HyprlandApps.tilde(pane.foreground_cwd || pane.cwd)}`;
         this.paneTabs.replaceChildren();
         const projectLabel = node(
           'span',
@@ -1105,6 +1393,8 @@
       this.syncPanels();
     }
     select(id) {
+      this.forwardPane = null;
+      const changed = id !== this.selected;
       this.recentPanes = [
         ...new Set([id, this.selected, ...this.recentPanes].filter(Boolean)),
       ].slice(0, 40);
@@ -1113,6 +1403,7 @@
       this.nativeInput.select(id);
       this.nativeInput.submit.disabled = !!this.uploading && this.uploadPane === id;
       this.selected = id;
+      if (changed) this.dictation?.voice.changeThread();
       storage.set('omarchy-herdr-pane', id);
       for (const row of this.list.querySelectorAll('.herdr-pane'))
         row.setAttribute('aria-current', String(row.dataset.pane === id));
@@ -1122,7 +1413,11 @@
       this.output.scrollLeft = 0;
       this.term.reset();
       this.inputStatus.textContent = '';
+      this.deepHistory = false;
       this.send({ type: 'select', pane_id: id });
+      // Another device may have sized it since; this view sizes it again once shown.
+      this.paneSize = null;
+      this.sizePane();
       if (id) {
         const pane = this.snapshot?.panes.find(p => p.pane_id === id);
         if (pane) this.showDetail(pane);
@@ -1139,11 +1434,34 @@
         return true;
       }
       if (this.detail.hidden) return false;
+      const left = this.selected;
       this.select(null);
+      this.forwardPane = left;
       return true;
     }
-    // Files, in its folder-pick mode, chooses where a new workspace's shell starts.
-    chooseFolder() {
+    // Forward reopens the thread Back left, while it still exists.
+    navigateForward() {
+      const pane = this.forwardPane;
+      if (!this.detail.hidden || !this.snapshot?.panes.some(p => p.pane_id === pane)) return false;
+      this.select(pane);
+      return true;
+    }
+    // A new tab in the pane's workspace starts in the pane's folder unless another is chosen.
+    newTab(pane) {
+      if (!pane) return;
+      this.chooseFolder({
+        title: 'New tab',
+        path: pane.foreground_cwd || pane.cwd,
+        create: cwd =>
+          api(`herdr/workspaces/${encodeURIComponent(pane.workspace_id)}/tabs`, { cwd }),
+      });
+    }
+    // Files, in its folder-pick mode, chooses where a new workspace's (or tab's) shell starts.
+    chooseFolder({
+      title = 'New pane',
+      path,
+      create = cwd => api('herdr/workspaces', { cwd }),
+    } = {}) {
       if (this.folderPicker) return;
       this.search.blur();
       const overlay = node('div', 'herdr-folder-picker');
@@ -1155,12 +1473,13 @@
       };
       this.closeFolderPicker = close;
       this.folderPicker = new window.HostFilesApp(overlay, null, 'herdr-folder', {
+        path,
         pick: {
-          title: 'New pane',
+          title,
           label: 'start here',
           cancel: close,
           choose: async cwd => {
-            const created = await api('herdr/workspaces', { cwd });
+            const created = await create(cwd);
             if (this.disposed) return;
             close();
             if (created.snapshot) {
@@ -1177,11 +1496,50 @@
       const i = panes.findIndex(p => p.pane_id === this.selected);
       if (i >= 0 && panes[i + delta]) this.select(panes[i + delta].pane_id);
     }
+    /* Like a terminal window, the open pane takes this view's size: it is laid out at the width
+       shown here, and follows rotation, tiling, and the window moving between devices. An
+       on-screen keyboard covering the view leaves its height alone, so programs do not redraw
+       each time it opens. */
+    sizePane(now = false) {
+      clearTimeout(this.sizeTimer);
+      if (!now) {
+        this.sizeTimer = setTimeout(() => this.sizePane(true), 300);
+        return;
+      }
+      const pane = this.selected;
+      const view = this.term.nativeView;
+      if (!pane || this.detail.hidden || document.hidden || !view.scroller.clientWidth) return;
+      const cols = Math.floor(view.scroller.clientWidth / view.width);
+      let rows = Math.floor(view.scroller.clientHeight / view.height);
+      const keyboard = document.documentElement.classList.contains('system-keyboard-open');
+      if (keyboard && this.windowRows) rows = this.windowRows;
+      else this.windowRows = rows;
+      if (cols < 20 || rows < 5) return;
+      const size = { cols: Math.min(500, cols), rows: Math.min(200, rows) };
+      if (
+        this.paneSize?.pane === pane &&
+        this.paneSize.cols === size.cols &&
+        this.paneSize.rows === size.rows
+      )
+        return;
+      if (this.send({ type: 'size', pane_id: pane, ...size })) this.paneSize = { pane, ...size };
+    }
+    show(visible) {
+      if (visible && !this.visible) {
+        this.paneSize = null;
+        this.sizePane();
+      }
+      this.visible = visible;
+    }
+    // Full-screen programs such as Vim lay out their own screen, so they are never wrapped.
     applyFit() {
       this.fitButton.textContent = this.fitOutput ? 'Fit' : 'Original';
       this.fitButton.setAttribute('aria-pressed', String(this.fitOutput));
       this.fitButton.setAttribute('aria-label', 'Fit to Phone');
-      this.term.nativeView.setFit(this.fitOutput);
+      this.fitButton.disabled = !!this.fullScreen;
+      this.fitButton.title = this.fullScreen ? 'Full-screen programs keep their own layout' : '';
+      const fit = this.fitOutput && !this.fullScreen;
+      if (fit !== this.term.nativeView.fit) this.term.nativeView.setFit(fit);
     }
     // The composer replaces the prompt row and adopts the attach and ↓ Latest controls.
     placeLatest() {
@@ -1189,15 +1547,25 @@
       this.promptRow.hidden = composing;
       if (composing) {
         this.nativeInput.row.insertBefore(this.attachButton, this.nativeInput.field);
+        this.nativeInput.row.insertBefore(this.dictation.control, this.nativeInput.field);
         this.nativeInput.header.insertBefore(this.latest, this.nativeInput.hideButton);
       } else {
         this.promptRow.prepend(this.attachButton);
+        this.promptRow.append(this.dictation.control);
         this.outputTools.append(this.latest);
       }
     }
     trackScroll() {
       this.followOutput = this.term.nativeView.follow;
       this.latest.hidden = this.followOutput;
+      this.syncHistory();
+    }
+    // Herdr sends the last 300 lines while following and up to 1000 (its limit) while reading back.
+    syncHistory() {
+      const deep = !!this.selected && !this.followOutput;
+      if (deep === !!this.deepHistory) return;
+      this.deepHistory = deep;
+      this.send({ type: 'history', deep });
     }
     showLatest() {
       this.stopTouchScroll.cancel();
@@ -1205,6 +1573,7 @@
       this.term.scrollToBottom();
       this.output.scrollLeft = 0;
       this.latest.hidden = true;
+      this.syncHistory();
     }
     flushRead() {
       const queued = this.queuedRead;
@@ -1238,34 +1607,40 @@
       if (!dimensions) return;
       const viewAnchor = this.term.nativeView.anchor(),
         scroll = viewAnchor.source;
-      const anchor = this.term.buffer.active.getLine(scroll)?.translateToString(true);
+      const before = bufferLines(this.term);
       const pane = this.selected;
       this.rendering = true;
       // The native view keeps showing the previous snapshot until this one is fully written.
       this.term.nativeView.hold(true);
+      // Agents that draw full-screen still write prose, which reads better wrapped.
+      const agent = this.snapshot?.panes?.find(p => p.pane_id === pane)?.agent;
+      const fullScreen = !!read.fullscreen && !agent;
+      if (fullScreen !== !!this.fullScreen) {
+        this.fullScreen = fullScreen;
+        this.applyFit();
+      }
       this.term.resize(Math.max(cols, dimensions.cols), Math.max(4, dimensions.rows));
       this.term.reset();
       this.term.write(text.replace(/\r?\n/g, '\r\n'), () => {
         if (this.selected === pane) {
           if (this.followOutput || !previous) this.term.scrollToBottom();
           else {
-            let target = scroll,
-              distance = Infinity;
-            for (let i = 0; i < this.term.buffer.active.length; i++)
-              if (
-                this.term.buffer.active.getLine(i)?.translateToString(true) === anchor &&
-                Math.abs(i - scroll) < distance
-              ) {
-                target = i;
-                distance = Math.abs(i - scroll);
-              }
+            const after = bufferLines(this.term);
+            const target = historyPosition(before, after, scroll);
             this.term.scrollToLine(target);
             this.term.nativeView.restore({ ...viewAnchor, follow: false }, target);
           }
         }
-        this.term.nativeView.hold(false);
-        this.rendering = false;
-        this.flushRead();
+        const release = () => {
+          this.term.nativeView.hold(false);
+          this.rendering = false;
+          this.flushRead();
+        };
+        const prompt = SHELLS.has(read.foreground?.[0]);
+        this.term.nativeView.showCursor = prompt;
+        const column = prompt ? suggestionColumn(this.term) : null;
+        if (column === null) release();
+        else this.term.write(`\x1b[${column + 1}G`, release);
       });
     }
     async uploadFiles(files, pane) {
@@ -1338,8 +1713,9 @@
         }
       }
     }
+    // Special keys (Esc, arrows, Return in Keys mode, the Ctrl tool) are typed, never pasted.
     key(input) {
-      return this.input(input);
+      return this.input({ ...input, typed: true });
     }
     setStatus(text) {
       this.status.hidden = /^\d+ panes$/.test(text);
@@ -1368,17 +1744,20 @@
         pane_id: this.selected,
         text: input.text,
         keys: input.keys,
+        ...(input.typed ? { typed: true } : {}),
       });
     }
     dispose() {
       this.disposed = true;
       window.removeEventListener('hyprland-text-scale', this.onTextScale);
+      this.dictation?.dispose();
       this.folderPicker?.dispose();
       this.uploadAbort.abort();
       clearTimeout(this.retry);
       this.ws?.close();
       this.resizeObserver.disconnect();
       this.splitObserver.disconnect();
+      clearTimeout(this.sizeTimer);
       this.stopTouchScroll();
       this.nativeInput.dispose();
       this.term.dispose();
@@ -1397,6 +1776,7 @@
       this.focusRetries = 0;
       this.rememberedFocus = new WeakMap();
       this.rememberFocus = e => {
+        if (editable(e.target)) this.focusReleased = null;
         const root = e.target.closest?.('[data-workspace]');
         if (root) this.rememberedFocus.set(root, e.target);
       };
@@ -1408,10 +1788,34 @@
           this.syncFocus();
         });
       };
-      for (const event of ['focusout', 'pointerup', 'transitionend'])
+      for (const event of ['focusout', 'pointerup', 'transitionend', 'selectionchange'])
         document.addEventListener(event, this.reconcileFocus);
+      // A press can become a text selection, and focusing the input mid-gesture would clear it.
+      this.pressed = false;
+      // iOS spends a long press on ending the input's editing session, not on selecting. Leaving
+      // the input unfocused afterwards lets the next long press select; a tap brings it back.
+      this.trackPress = e => {
+        if (e.pointerType === 'touch') return;
+        const pressed = e.touches ? e.touches.length > 0 : e.type === 'pointerdown';
+        if (pressed && !this.pressed) this.pressStarted = performance.now();
+        this.pressed = pressed;
+        if (pressed) return;
+        if (performance.now() - this.pressStarted >= 350 && !editable(document.activeElement))
+          this.focusReleased = this.logic.cur();
+        this.reconcileFocus();
+      };
+      for (const event of PRESS_EVENTS)
+        document.addEventListener(event, this.trackPress, { capture: true, passive: true });
+      // Typing after a long press goes to the input again, as a tap would.
+      this.typeToFocus = e => {
+        if (!this.focusReleased || e.metaKey || e.ctrlKey || e.altKey || editable(e.target)) return;
+        this.focusReleased = null;
+        this.syncFocus();
+      };
+      document.addEventListener('keydown', this.typeToFocus, true);
       window.addEventListener('focus', this.reconcileFocus);
       this.foreground = () => {
+        this.pressed = false;
         if (!document.hidden) for (const app of Object.values(this.apps)) app.resume?.();
       };
       document.addEventListener('visibilitychange', this.foreground);
@@ -1459,6 +1863,7 @@
       });
     }
     keyboard() {
+      this.focusReleased = null;
       if (!this.logic.state.ov) {
         this.logic.set({ kb: true });
         this.currentInput()?.focus();
@@ -1545,6 +1950,8 @@
         this.cancelNativeFocus();
         return;
       }
+      if (this.focusReleased !== current) this.focusReleased = null;
+      if (this.pressed || this.focusReleased) return;
       const root = mount(HyprlandApps.get(current)?.mount);
       if (!root) return;
       const selection = window.getSelection();
@@ -1556,6 +1963,15 @@
       )
         return;
       const active = document.activeElement;
+      // Keyboard-operated resize controls own their arrow keys until focus leaves them.
+      if (
+        root.contains(active) &&
+        active.checkVisibility() &&
+        active.matches('[role="separator"][tabindex], [role="slider"][tabindex]')
+      ) {
+        this.cancelNativeFocus();
+        return;
+      }
       if (
         root.contains(active) &&
         active.checkVisibility() &&
@@ -1669,8 +2085,11 @@
       this.cancelNativeFocus();
       if (activeBridge === this) activeBridge = null;
       cancelAnimationFrame(this.focusFrame);
-      for (const event of ['focusout', 'pointerup', 'transitionend'])
+      for (const event of ['focusout', 'pointerup', 'transitionend', 'selectionchange'])
         document.removeEventListener(event, this.reconcileFocus);
+      for (const event of PRESS_EVENTS)
+        document.removeEventListener(event, this.trackPress, { capture: true });
+      document.removeEventListener('keydown', this.typeToFocus, true);
       window.removeEventListener('focus', this.reconcileFocus);
       document.removeEventListener('focusin', this.rememberFocus);
       window.removeEventListener('hyprland-hardware-keyboard', this.hardwareChanged);
@@ -1763,5 +2182,6 @@
     keyInput,
     orderHerdr,
     paneGroup,
+    paneState,
   };
 })();

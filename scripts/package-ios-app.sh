@@ -12,8 +12,8 @@ fi
 app=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 out=$(cd "$(dirname "$2")" && pwd)/$(basename "$2")
 platform=$(/usr/libexec/PlistBuddy -c 'Print :DTPlatformName' "$app/Info.plist")
-if [ "$platform" != iphoneos ]; then
-  echo "$app is a $platform build; build for a device or Any iOS Device" >&2
+if [ "$platform" != iphoneos ] && [ "$platform" != xros ]; then
+  echo "$app is a $platform build; build for a physical iOS or visionOS device" >&2
   exit 1
 fi
 codesign --verify --deep --strict "$app"

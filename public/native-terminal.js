@@ -240,6 +240,9 @@
       this.schedule(true);
     }
     anchor() {
+      // A snapshot may have finished parsing before its next animation frame. Its
+      // pending anchor refers to that buffer; the DOM still describes the old one.
+      if (this.savedAnchor) return { ...this.savedAnchor };
       const visual = Math.floor(this.scroller.scrollTop / this.height),
         entry = this.layout[visual];
       return {
@@ -260,9 +263,13 @@
       this.follow = anchor.follow;
       this.schedule();
     }
+    cursorShown() {
+      return this.cursorVisible && (this.showCursor ?? !this.term.options.disableStdin);
+    }
     buildLayout(buffer, columns) {
       this.layout = [];
       this.sourceRows = [];
+      const cursorSource = this.cursorShown() ? buffer.baseY + buffer.cursorY : -1;
       for (let source = 0; source < buffer.length; source++) {
         this.sourceRows[source] = this.layout.length;
         const line = buffer.getLine(source);
@@ -277,6 +284,9 @@
           )
             end--;
           if (end > 0) end = Math.min(this.term.cols, end - 1 + line.getCell(end - 1).getWidth());
+          // Keep the cell under a cursor that sits past the last character, as at a prompt.
+          if (source === cursorSource)
+            end = Math.max(end, Math.min(this.term.cols, buffer.cursorX + 1));
         }
         for (let start = 0; start < Math.max(1, end);) {
           let stop = this.fit ? Math.min(end, start + columns) : end;
@@ -541,11 +551,9 @@
               bg === 'transparent' ? this.term.options.theme.background || '#15131f' : bg,
               fg,
             ];
+          // Read-only views show no cursor unless their owner sets showCursor (Herdr at a prompt).
           const cursor =
-            this.cursorVisible &&
-            !term.options.disableStdin &&
-            entry.source === b.baseY + b.cursorY &&
-            x === b.cursorX;
+            this.cursorShown() && entry.source === b.baseY + b.cursorY && x === b.cursorX;
           const decoration =
             [
               c.isUnderline() ? 'underline' : '',
